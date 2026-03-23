@@ -1,0 +1,33 @@
+name: riderlink
+description: RiderLink - The Offline Safety Ecosystem for Indian Motorcyclists
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  get: ^4.6.5
+  flutter_blue_plus: ^1.31.17
+  flutter_map: ^6.0.0
+  latlong2: ^0.9.0
+  sqflite_sqlcipher: ^3.0.0
+  path: ^1.8.3
+  permission_handler: ^11.0.0
+  shared_preferences: ^2.2.2
+  url_launcher: ^6.2.5
+  http: ^1.2.0
+  geolocator: ^11.0.1
+  sensors_plus: ^7.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/map_tiles/

@@ -14,10 +14,8 @@ import 'package:jwt_decoder/jwt_decoder.dart';
 ///     always has fresh data without a separate profile fetch
 class AuthController extends GetxController {
   // ── Backend base URL ────────────────────────────────────────────────────────
-  // Change to your deployed Cloud Run / ngrok URL for production.
-  // For local dev: run `python main.py` in cloud_backend/ and use 10.0.2.2 on
-  // Android emulator (maps to host machine's localhost).
-  static const String _baseUrl = 'http://10.0.2.2:8080';
+  // Physical device: use your Mac's local WiFi IP (not 10.0.2.2 which is emulator-only)
+  static const String _baseUrl = 'http://10.102.77.9:8080';
 
   // ── Reactive state ──────────────────────────────────────────────────────────
   final RxBool isLoggedIn   = false.obs;

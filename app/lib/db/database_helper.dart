@@ -2,6 +2,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:math';
+import 'dart:io';
 
 class DatabaseHelper {
   static final DatabaseHelper _instance = DatabaseHelper._internal();
@@ -20,26 +21,44 @@ class DatabaseHelper {
   }
 
   Future<Database> _initDatabase() async {
-    String path = join(await getDatabasesPath(), 'riderlink_secure.db');
+    final dbPath = join(await getDatabasesPath(), 'riderlink_secure.db');
+    final prefs  = await SharedPreferences.getInstance();
 
-    // Derive a per-install encryption key stored in SharedPreferences.
-    // This is not as strong as Android Keystore but is far better than a
-    // hardcoded string committed to source control. The key is generated once
-    // on first launch and persisted — the database can only be opened on the
-    // same device installation.
-    final prefs = await SharedPreferences.getInstance();
+    // Generate (or restore) the per-install encryption key
     String? dbKey = prefs.getString('_db_enc_key');
     if (dbKey == null) {
-      // Generate a random 32-character alphanumeric key on first launch
       const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
       final rng = Random.secure();
       dbKey = List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
       await prefs.setString('_db_enc_key', dbKey);
     }
 
-    return await openDatabase(
+    try {
+      return await _openDb(dbPath, dbKey);
+    } catch (e) {
+      // The DB file is corrupt or was created with a different key
+      // (e.g. leftover from the old hardcoded-password version).
+      // Delete it and start fresh — trip history is lost but the app
+      // will not crash on every launch.
+      final file = File(dbPath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+      // Also wipe the stale key so a new one is generated cleanly
+      await prefs.remove('_db_enc_key');
+      const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      final rng = Random.secure();
+      dbKey = List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
+      await prefs.setString('_db_enc_key', dbKey);
+
+      return await _openDb(dbPath, dbKey);
+    }
+  }
+
+  Future<Database> _openDb(String path, String key) {
+    return openDatabase(
       path,
-      password: dbKey,
+      password: key,
       version: 1,
       onCreate: (db, version) async {
         await db.execute('''
@@ -51,7 +70,6 @@ class DatabaseHelper {
             longitude REAL
           )
         ''');
-        
         await db.execute('''
           CREATE TABLE messages(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +79,6 @@ class DatabaseHelper {
             is_sent_by_me INTEGER
           )
         ''');
-
         await db.execute('''
           CREATE TABLE trips(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +89,6 @@ class DatabaseHelper {
             top_speed REAL
           )
         ''');
-        
         await db.execute('''
           CREATE TABLE route_points(
             id INTEGER PRIMARY KEY AUTOINCREMENT,

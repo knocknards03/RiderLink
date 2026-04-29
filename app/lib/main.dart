@@ -11,8 +11,15 @@ import 'db/database_helper.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize encrypted local database
-  await DatabaseHelper().database;
+  // Initialize encrypted local database.
+  // DatabaseHelper handles corrupt/stale files by deleting and recreating.
+  try {
+    await DatabaseHelper().database;
+  } catch (e) {
+    // Should never reach here after the self-healing logic in DatabaseHelper,
+    // but guard anyway so the app doesn't hard-crash on launch.
+    debugPrint('DB init error (non-fatal): $e');
+  }
 
   // Auth controller must be first — splash screen reads isLoggedIn to decide routing
   Get.put(AuthController());

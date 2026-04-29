@@ -1,14 +1,13 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:get/get.dart';
 import '../controllers/ble_controller.dart';
-import '../utils/navigation_service.dart';
 import '../controllers/analytics_controller.dart';
 import '../controllers/settings_controller.dart';
-import 'profile_screen.dart';
-import 'trip_replay_screen.dart';
-import 'garage_screen.dart';
+import '../utils/navigation_service.dart';
+import 'quick_toggle_screen.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -17,47 +16,138 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   final MapController _mapController = MapController();
+
+  // Auto-follow: when true the map camera tracks the rider and rotates to heading
+  bool _followMode = true;
   bool _hasCenteredOnLocation = false;
+
+  // Workers stored for clean disposal
+  Worker? _locationWorker;
+  Worker? _headingWorker;
+
+  // Animation controllers for smooth marker pulse
+  late AnimationController _markerPulseController;
 
   @override
   void initState() {
     super.initState();
+
+    _markerPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final bleController = Get.find<BleController>();
-      
-      // Auto-center immediately if we already have a lock from splash screen
-      if (bleController.myLocation.value != null) {
+      final ble = Get.find<BleController>();
+      final analytics = Get.find<AnalyticsController>();
+
+      // First-center on GPS lock
+      if (ble.myLocation.value != null && !_hasCenteredOnLocation) {
         _hasCenteredOnLocation = true;
+        _mapController.move(ble.myLocation.value!, 17.0);
       }
-      
-      // Keep a listening hook strictly for the very first time GPS acquires a lock
-      ever(bleController.myLocation, (LatLng? loc) {
-        if (loc != null && !_hasCenteredOnLocation) {
+
+      // Follow location updates
+      _locationWorker = ever(ble.myLocation, (LatLng? loc) {
+        if (loc == null) return;
+        if (!_hasCenteredOnLocation) {
           _hasCenteredOnLocation = true;
-          _mapController.move(loc, 16.0);
+        }
+        if (_followMode) {
+          _mapController.move(loc, _mapController.camera.zoom);
+        }
+      });
+
+      // Rotate map to match heading in follow mode
+      _headingWorker = ever(analytics.fusedHeading, (double heading) {
+        if (_followMode) {
+          // flutter_map rotation: negative heading so map rotates under the arrow
+          _mapController.rotate(-heading);
         }
       });
     });
   }
 
-  // Reusable helper method to quickly stamp out identical Pit Stop Notification buttons
-  Widget _buildBreakBtn(BleController controller, String type, IconData icon) {
+  @override
+  void dispose() {
+    _locationWorker?.dispose();
+    _headingWorker?.dispose();
+    _markerPulseController.dispose();
+    super.dispose();
+  }
+
+  void _toggleFollowMode() {
+    setState(() => _followMode = !_followMode);
+    if (_followMode) {
+      final ble = Get.find<BleController>();
+      if (ble.myLocation.value != null) {
+        _mapController.move(ble.myLocation.value!, 17.0);
+        final analytics = Get.find<AnalyticsController>();
+        _mapController.rotate(-analytics.fusedHeading.value);
+      }
+    } else {
+      // Reset map rotation when leaving follow mode
+      _mapController.rotate(0);
+    }
+  }
+
+  // Build the animated directional arrow marker for the current rider
+  Widget _buildMyLocationMarker(double headingDeg) {
+    return AnimatedBuilder(
+      animation: _markerPulseController,
+      builder: (context, child) {
+        final pulse = 0.85 + 0.15 * _markerPulseController.value;
+        return Stack(
+          alignment: Alignment.center,
+          children: [
+            // Accuracy halo
+            Container(
+              width: 56 * pulse,
+              height: 56 * pulse,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.blueAccent.withOpacity(0.18 * pulse),
+                border: Border.all(
+                  color: Colors.blueAccent.withOpacity(0.35),
+                  width: 1.5,
+                ),
+              ),
+            ),
+            // Directional arrow — rotated to heading
+            // In follow mode the map itself rotates, so the arrow always points up.
+            // In free mode we rotate the arrow widget to show true heading.
+            Transform.rotate(
+              angle: _followMode ? 0 : headingDeg * math.pi / 180.0,
+              child: CustomPaint(
+                size: const Size(36, 36),
+                painter: _ArrowMarkerPainter(),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Pit-stop button helper
+  Widget _buildBreakBtn(BleController ble, String type, IconData icon) {
     return Obx(() {
       final settings = Get.find<SettingsController>();
-      double height = settings.isGloveMode.value ? 60 : 40;
-      double fontSize = settings.isGloveMode.value ? 16 : 12;
-      double iconSize = settings.isGloveMode.value ? 24 : 18;
-
+      final glove = settings.isGloveMode.value;
       return SizedBox(
-        height: height,
-        child: FloatingActionButton.extended(
-          heroTag: 'btn_$type',
-          backgroundColor: Colors.orangeAccent,
-          icon: Icon(icon, size: iconSize),
-          label: Text(type, style: TextStyle(fontSize: fontSize)),
-          onPressed: () => controller.sendBreak(type), 
+        height: glove ? 56 : 44,
+        child: ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFFFF8C00),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+            padding: EdgeInsets.symmetric(horizontal: glove ? 16 : 12),
+          ),
+          icon: Icon(icon, size: glove ? 22 : 18),
+          label: Text(type, style: TextStyle(fontSize: glove ? 15 : 12, fontWeight: FontWeight.w600)),
+          onPressed: () => ble.sendBreak(type),
         ),
       );
     });
@@ -65,409 +155,526 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Inject the global Bluetooth controller so this UI screen can react to live hardware changes
-    final BleController bleController = Get.find<BleController>();
+    final ble = Get.find<BleController>();
+    final analytics = Get.find<AnalyticsController>();
+    final settings = Get.find<SettingsController>();
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('RiderLink Navigation'),
-        actions: [
-          // The Obx widget forces this isolated row to selectively re-render whenever the Bluetooth connection connects or drops
-          Obx(() => Padding(
-            padding: const EdgeInsets.only(right: 16.0),
-            child: Row(
-              children: [
-                Icon(
-                  bleController.isConnected.value ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-                  color: bleController.isConnected.value ? Colors.greenAccent : Colors.redAccent,
+      backgroundColor: Colors.black,
+      // No AppBar — full-screen map like Google Maps
+      body: Stack(
+        children: [
+          // ── MAP ──────────────────────────────────────────────────────────
+          Obx(() {
+            final heading = analytics.fusedHeading.value;
+            return FlutterMap(
+              mapController: _mapController,
+              options: MapOptions(
+                initialCenter: ble.myLocation.value ?? const LatLng(20.5937, 78.9629),
+                initialZoom: ble.myLocation.value != null ? 17.0 : 5.0,
+                minZoom: 3,
+                maxZoom: 19,
+                // Disable map rotation gesture in follow mode to avoid fighting the auto-rotate
+                interactionOptions: InteractionOptions(
+                  flags: _followMode
+                      ? InteractiveFlag.pinchZoom | InteractiveFlag.doubleTapZoom
+                      : InteractiveFlag.all,
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  bleController.isConnected.value ? "Connected" : "Disconnected",
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-          ))
-        ],
-      ),
-      // A slide-out Navigation Drawer granting access to the offline personal settings
-      drawer: Drawer(
-        child: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            const DrawerHeader(
-              decoration: BoxDecoration(color: Colors.pink),
-              child: Text('RiderLink Menu', style: TextStyle(color: Colors.white, fontSize: 24)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.person),
-              title: const Text('My Profile'),
-              onTap: () {
-                Navigator.pop(context); // Smoothly collapse the drawer
-                Get.to(() => const ProfileScreen()); // Push the user to their profile view
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.history),
-              title: const Text('Trip History & Replays'),
-              onTap: () {
-                Navigator.pop(context);
-                Get.to(() => const TripReplayScreen());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.garage),
-              title: const Text('Digital Garage'),
-              onTap: () {
-                Navigator.pop(context);
-                Get.to(() => const GarageScreen());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.settings),
-              title: const Text('Rider Settings'),
-              onTap: () {
-                Navigator.pop(context);
-                final settings = Get.find<SettingsController>();
-                showDialog(context: context, builder: (ctx) => AlertDialog(
-                  title: const Text("Preferences"),
-                  content: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Obx(() => SwitchListTile(
-                        title: const Text("Glove-Friendly UI (Extra Large)"),
-                        value: settings.isGloveMode.value,
-                        onChanged: (val) => settings.toggleGloveMode(),
-                      )),
-                      Obx(() => SwitchListTile(
-                        title: const Text("Curvy Routes (Scenic)"),
-                        value: settings.preferCurvyRoutes.value,
-                        onChanged: (val) => settings.toggleCurvyRoutes(),
-                      )),
-                      Obx(() => SwitchListTile(
-                        title: const Text("Voice Navigation TTS"),
-                        value: settings.enableVoiceNav.value,
-                        onChanged: (val) => settings.toggleVoiceNav(),
-                      )),
-                    ],
-                  ),
-                  actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Close"))],
-                ));
-              },
-            ),
-            const Divider(),
-            const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: Text("Quick Chat (LoRa Mesh)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-            ),
-            Wrap(
-              alignment: WrapAlignment.spaceEvenly,
-              runSpacing: 10,
-              children: [
-                ActionChip(
-                  avatar: const Icon(Icons.local_gas_station, size: 16),
-                  label: const Text("Need Fuel"), 
-                  onPressed: () { bleController.sendMeshMessage("I need fuel soon!"); Navigator.pop(context); }
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.back_hand, size: 16),
-                  label: const Text("Wait Up"), 
-                  onPressed: () { bleController.sendMeshMessage("Wait for me!"); Navigator.pop(context); }
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.local_police, size: 16),
-                  label: const Text("Cop Ahead"), 
-                  onPressed: () { bleController.sendMeshMessage("Police checkpoint ahead!"); Navigator.pop(context); }
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.thumb_up, size: 16),
-                  label: const Text("Clear"), 
-                  onPressed: () { bleController.sendMeshMessage("Road is clear!"); Navigator.pop(context); }
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-      // A Stack visually overlays UI elements directly on top of the interactive background map
-      body: SafeArea(
-        child: Stack(
-          children: [
-            FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: bleController.myLocation.value ?? const LatLng(20.5937, 78.9629),
-              initialZoom: bleController.myLocation.value != null ? 16.0 : 5.0,
-              // Calculate a route seamlessly whenever the user holds on the map
-              onLongPress: (tapPosition, point) async {
-                  bleController.destinationPin.value = point;
-                  if (bleController.myLocation.value != null) {
-                      final route = await NavigationService.getRoute(bleController.myLocation.value!, point);
-                      bleController.currentRoute.assignAll(route);
-                      final settings = Get.find<SettingsController>();
-                      settings.speakInstruction("Route recalculated. Turn left in 200 meters.");
-                  } else {
-                      Get.snackbar("Location Unknown", "Waiting for GPS lock before navigating.", snackPosition: SnackPosition.BOTTOM);
+                onPositionChanged: (MapPosition position, bool hasGesture) {
+                  // User dragged the map — exit follow mode
+                  if (hasGesture && _followMode) {
+                    setState(() => _followMode = false);
+                    _mapController.rotate(0);
                   }
-              }
-            ),
-            children: [
-              // Pulls mapping grid terrain online using public OpenStreetMap APIs
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.riderlink',
+                },
+                onLongPress: (tapPosition, point) async {
+                  ble.destinationPin.value = point;
+                  if (ble.myLocation.value != null) {
+                    final route = await NavigationService.getRoute(ble.myLocation.value!, point);
+                    ble.currentRoute.assignAll(route);
+                    settings.speakInstruction("Route calculated. Follow the blue line.");
+                  }
+                },
               ),
-              // Draws the thick blue navigation path if a route exists
-              Obx(() {
-                  if (bleController.currentRoute.isEmpty) return const SizedBox.shrink();
-                  return PolylineLayer(
-                      polylines: [
-                          Polyline(
-                              points: bleController.currentRoute.toList(),
-                              color: Colors.blueAccent,
-                              strokeWidth: 6.0,
-                          )
-                      ]
-                  );
-              }),
-              // Reactive Marker Layer plotting the live GPS coordinates of your friends and yourself
-              Obx(() {
-                List<Marker> markers = [];
-                // Plot other riders
-                for(var entry in bleController.riderLocations.entries) {
-                    List<double> loc = entry.value;
+              children: [
+                // OSM tile layer
+                TileLayer(
+                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                  userAgentPackageName: 'com.example.riderlink',
+                  tileBuilder: (context, tileWidget, tile) => tileWidget,
+                ),
+
+                // Route polyline
+                Obx(() {
+                  if (ble.currentRoute.isEmpty) return const SizedBox.shrink();
+                  return PolylineLayer(polylines: [
+                    // Route shadow
+                    Polyline(
+                      points: ble.currentRoute.toList(),
+                      color: Colors.black38,
+                      strokeWidth: 10.0,
+                    ),
+                    // Route fill
+                    Polyline(
+                      points: ble.currentRoute.toList(),
+                      color: const Color(0xFF4285F4),
+                      strokeWidth: 7.0,
+                    ),
+                  ]);
+                }),
+
+                // All markers
+                Obx(() {
+                  final List<Marker> markers = [];
+
+                  // Other riders — red motorcycle icons
+                  for (final entry in ble.riderLocations.entries) {
+                    final loc = entry.value;
                     markers.add(Marker(
                       point: LatLng(loc[0], loc[1]),
-                      width: 40, height: 40,
-                      child: const Icon(Icons.motorcycle, color: Colors.red, size: 40),
+                      width: 48,
+                      height: 48,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade700,
+                          shape: BoxShape.circle,
+                          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 6)],
+                        ),
+                        child: const Icon(Icons.motorcycle, color: Colors.white, size: 26),
+                      ),
                     ));
-                }
-                // Plot my own live location
-                if (bleController.myLocation.value != null) {
-                    markers.add(Marker(
-                       point: bleController.myLocation.value!,
-                       width: 40, height: 40,
-                       child: const Icon(Icons.navigation, color: Colors.blue, size: 40),
-                    ));
-                }
-                // Plot the destination pin
-                if (bleController.destinationPin.value != null) {
-                    markers.add(Marker(
-                       point: bleController.destinationPin.value!,
-                       width: 40, height: 40,
-                       child: const Icon(Icons.location_on, color: Colors.green, size: 50),
-                    ));
-                }
-                // Plot hazards on the route
-                for(var hazard in bleController.reportedHazards) {
-                    markers.add(Marker(
-                      point: LatLng(hazard['lat'], hazard['lng']),
-                      width: 40, height: 40,
-                      child: const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 40),
-                    ));
-                }
-                return MarkerLayer(markers: markers);
-              }),
-            ],
-          ),
-          
-          // An extremely visible Emergency SOS button pinned forcefully to the top left margin
-          Positioned(
-            top: 20,
-            left: 10,
-            child: Obx(() {
-              final settings = Get.find<SettingsController>();
-              return FloatingActionButton.extended(
-                heroTag: 'sos_btn',
-                backgroundColor: Colors.red,
-                icon: Icon(Icons.warning, color: Colors.white, size: settings.isGloveMode.value ? 32 : 24),
-                label: Text("SOS", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: settings.isGloveMode.value ? 20 : 14)),
-                onPressed: () => bleController.sendSOS(),
-              );
-            }),
-          ),
-          
-          // Mocked Weather Alerts Banner (Size-reduced compact pill)
-          Positioned(
-            top: 20,
-            right: 16, // Right-aligned, freeing up the center and left of the map
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.blueGrey.withOpacity(0.95),
-                borderRadius: BorderRadius.circular(15),
-                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.cloud_outlined, color: Colors.white, size: 16),
-                  SizedBox(width: 6),
-                  Text("Clear: 24°C", 
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
-                  ),
-                ],
-              ),
-            ),
-          ),
+                  }
 
-          // Live Telemetry Overlay
-          Positioned(
-            top: 80,
-            right: 10,
-            child: Obx(() {
-               final analytics = Get.find<AnalyticsController>();
-               return Container(
-                 padding: const EdgeInsets.all(8),
-                 decoration: BoxDecoration(
-                   color: Colors.black87.withOpacity(0.75),
-                   borderRadius: BorderRadius.circular(10),
-                   border: Border.all(color: Colors.pinkAccent, width: 1),
-                 ),
-                 child: Column(
-                   crossAxisAlignment: CrossAxisAlignment.end,
-                   children: [
-                     Text("Lean: ${analytics.currentLeanAngle.value.toStringAsFixed(1)}°", style: const TextStyle(color: Colors.white, fontFamily: 'monospace')),
-                     Text("Max Lean: ${analytics.maxLeanAngle.value.toStringAsFixed(1)}°", style: const TextStyle(color: Colors.redAccent, fontFamily: 'monospace', fontSize: 10)),
-                     const SizedBox(height: 4),
-                     Text("G-Force: ${analytics.currentGForce.value.toStringAsFixed(2)}G", style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace')),
-                   ],
-                 ),
-               );
-            }),
-          ),
-          
-          // Horizontal Pit Stop controls arrayed along the bottom edge like a navigation bar
-          Positioned(
-            bottom: 20,
-            left: 10,
-            right: 80, // Prevent overlap with the floating action buttons on the right
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
+                  // Destination pin
+                  if (ble.destinationPin.value != null) {
+                    markers.add(Marker(
+                      point: ble.destinationPin.value!,
+                      width: 44,
+                      height: 56,
+                      child: const Icon(Icons.location_on, color: Color(0xFF34A853), size: 52),
+                    ));
+                  }
+
+                  // Hazard markers
+                  for (final hazard in ble.reportedHazards) {
+                    markers.add(Marker(
+                      point: LatLng(hazard['lat'] as double, hazard['lng'] as double),
+                      width: 40,
+                      height: 40,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.orange.shade800,
+                          shape: BoxShape.circle,
+                          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 4)],
+                        ),
+                        child: const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 22),
+                      ),
+                    ));
+                  }
+
+                  // My location — animated directional arrow
+                  if (ble.myLocation.value != null) {
+                    markers.add(Marker(
+                      point: ble.myLocation.value!,
+                      width: 60,
+                      height: 60,
+                      child: _buildMyLocationMarker(heading),
+                    ));
+                  }
+
+                  return MarkerLayer(markers: markers);
+                }),
+              ],
+            );
+          }),
+
+          // ── TOP BAR ──────────────────────────────────────────────────────
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
-                  _buildBreakBtn(bleController, "Tea", Icons.local_cafe),
-                  const SizedBox(width: 8),
-                  _buildBreakBtn(bleController, "Breakfast", Icons.restaurant),
-                  const SizedBox(width: 8),
-                  _buildBreakBtn(bleController, "Lunch", Icons.lunch_dining),
-                  const SizedBox(width: 8),
-                  _buildBreakBtn(bleController, "Dinner", Icons.dinner_dining),
+                  // Quick-toggle panel button (replaces drawer)
+                  GestureDetector(
+                    onTap: () => QuickTogglePanel.show(
+                      followMode: _followMode,
+                      onToggleFollow: _toggleFollowMode,
+                    ),
+                    child: Container(
+                      width: 44, height: 44,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                      ),
+                      child: const Icon(Icons.menu, color: Colors.black87),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+
+                  // Speed + BLE status pill
+                  Expanded(
+                    child: Obx(() {
+                      final speed = ble.mySpeedKmh.value;
+                      final connected = ble.isConnected.value;
+                      return Container(
+                        height: 44,
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(22),
+                          boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Row(children: [
+                              const Icon(Icons.speed, size: 18, color: Color(0xFF4285F4)),
+                              const SizedBox(width: 6),
+                              Text(
+                                "${speed.toStringAsFixed(0)} km/h",
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                              ),
+                            ]),
+                            Row(children: [
+                              Icon(
+                                connected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+                                size: 16,
+                                color: connected ? Colors.green : Colors.red,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                connected ? "LoRa" : "No HW",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: connected ? Colors.green : Colors.red,
+                                ),
+                              ),
+                            ]),
+                          ],
+                        ),
+                      );
+                    }),
+                  ),
+                  const SizedBox(width: 10),
+
+                  // SOS button
+                  Obx(() {
+                    final glove = settings.isGloveMode.value;
+                    return GestureDetector(
+                      onTap: () => ble.sendSOS(),
+                      child: Container(
+                        width: glove ? 64 : 52,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: Colors.red,
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: const [BoxShadow(color: Colors.red, blurRadius: 8, spreadRadius: 1)],
+                        ),
+                        child: Center(
+                          child: Text(
+                            "SOS",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: glove ? 16 : 13,
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
                 ],
               ),
             ),
           ),
 
-          // Hazard Reporting Button ("Waze for bikes")
+          // ── TELEMETRY HUD (top-right) ─────────────────────────────────────
           Positioned(
-            bottom: 90, // Above the log floating button
-            right: 16,
-            child: FloatingActionButton(
-              heroTag: 'hazard_btn',
-              backgroundColor: Colors.orange,
-              onPressed: () {
-                Get.bottomSheet(
-                  Container(
-                    color: Colors.white,
-                    padding: const EdgeInsets.all(20),
-                    child: Wrap(
-                      spacing: 12,
-                      runSpacing: 12,
-                      children: [
-                        const SizedBox(
-                          width: double.infinity,
-                          child: Text("Report Hazard Ahead", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black87)),
-                        ),
-                        const Divider(),
-                        ActionChip(
-                          avatar: const Icon(Icons.warning, color: Colors.white, size: 16),
-                          label: const Text("Pothole", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          backgroundColor: Colors.orange,
-                          onPressed: () { Get.back(); bleController.reportHazard("Pothole"); }
-                        ),
-                        ActionChip(
-                          avatar: const Icon(Icons.scatter_plot, color: Colors.white, size: 16),
-                          label: const Text("Gravel", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          backgroundColor: Colors.orange,
-                          onPressed: () { Get.back(); bleController.reportHazard("Gravel"); }
-                        ),
-                        ActionChip(
-                          avatar: const Icon(Icons.water_drop, color: Colors.white, size: 16),
-                          label: const Text("Oil Spill", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          backgroundColor: Colors.orange,
-                          onPressed: () { Get.back(); bleController.reportHazard("Oil Spill"); }
-                        ),
-                        ActionChip(
-                          avatar: const Icon(Icons.pets, color: Colors.white, size: 16),
-                          label: const Text("Animal", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          backgroundColor: Colors.redAccent,
-                          onPressed: () { Get.back(); bleController.reportHazard("Animal"); }
-                        ),
-                      ],
-                    ),
+            top: 80,
+            right: 12,
+            child: SafeArea(
+              child: Obx(() {
+                final lean = analytics.currentLeanAngle.value;
+                final maxLean = analytics.maxLeanAngle.value;
+                final gForce = analytics.currentGForce.value;
+                final heading = analytics.fusedHeading.value;
+
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.78),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white12),
+                    boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 10)],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      _hudRow(Icons.rotate_90_degrees_ccw, "Lean",
+                          "${lean.toStringAsFixed(1)}°", _leanColor(lean)),
+                      const SizedBox(height: 4),
+                      _hudRow(Icons.arrow_upward, "Max",
+                          "${maxLean.toStringAsFixed(1)}°", Colors.redAccent),
+                      const SizedBox(height: 4),
+                      _hudRow(Icons.bolt, "G",
+                          "${gForce.toStringAsFixed(2)}G", Colors.greenAccent),
+                      const SizedBox(height: 4),
+                      _hudRow(Icons.explore, "HDG",
+                          "${heading.toStringAsFixed(0)}°", Colors.cyanAccent),
+                    ],
                   ),
                 );
-              },
-              child: const Icon(Icons.report_problem, color: Colors.white, size: 28),
+              }),
             ),
           ),
-          
-          // Center on Live Location Button
+
+          // ── RIGHT SIDE BUTTONS ────────────────────────────────────────────
           Positioned(
-            bottom: 160, 
-            right: 16,
-            child: FloatingActionButton(
-              heroTag: 'center_loc_btn',
-              backgroundColor: Colors.white,
-              onPressed: () {
-                if (bleController.myLocation.value != null) {
-                  _mapController.move(bleController.myLocation.value!, 16.0);
-                  Get.snackbar("GPS Lock", "Centered on your live location.", backgroundColor: Colors.green, colorText: Colors.white);
-                } else {
-                  Get.snackbar("Searching", "Awaiting GPS satellite lock...", snackPosition: SnackPosition.BOTTOM, backgroundColor: Colors.orange, colorText: Colors.white);
-                }
-              },
-              child: const Icon(Icons.my_location, color: Colors.blueAccent),
-            ),
-          )
-        ],
-      )),
-      
-      // Secondary action dial to manually pop open the live bluetooth diagnostic viewer 
-      floatingActionButton: FloatingActionButton(
-        heroTag: 'log_btn',
-        onPressed: () {
-          showDialog(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('Hardware Logs'),
-              content: SizedBox(
-                height: 400,
-                width: 300,
-                child: Obx(() => ListView.builder(
-                  itemCount: bleController.logs.length,
-                  itemBuilder: (context, index) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4.0),
-                    child: Text(
-                      bleController.logs[index],
-                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-                    ),
+            right: 12,
+            bottom: 120,
+            child: Column(
+              children: [
+                // Follow / free mode toggle
+                _mapBtn(
+                  icon: _followMode ? Icons.navigation : Icons.navigation_outlined,
+                  color: _followMode ? const Color(0xFF4285F4) : Colors.white,
+                  iconColor: _followMode ? Colors.white : Colors.black87,
+                  onTap: _toggleFollowMode,
+                  tooltip: _followMode ? "Following" : "Free View",
+                ),
+                const SizedBox(height: 10),
+                // Zoom in
+                _mapBtn(
+                  icon: Icons.add,
+                  onTap: () => _mapController.move(
+                    _mapController.camera.center,
+                    (_mapController.camera.zoom + 1).clamp(3, 19),
                   ),
-                )),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Close'),
-                )
+                ),
+                const SizedBox(height: 6),
+                // Zoom out
+                _mapBtn(
+                  icon: Icons.remove,
+                  onTap: () => _mapController.move(
+                    _mapController.camera.center,
+                    (_mapController.camera.zoom - 1).clamp(3, 19),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                // Hazard report
+                _mapBtn(
+                  icon: Icons.report_problem,
+                  color: Colors.orange.shade700,
+                  iconColor: Colors.white,
+                  onTap: _showHazardSheet,
+                  tooltip: "Report Hazard",
+                ),
+                const SizedBox(height: 10),
+                // Logs
+                _mapBtn(
+                  icon: Icons.terminal,
+                  onTap: _showLogsDialog,
+                  tooltip: "Logs",
+                ),
               ],
             ),
-          );
-        },
-        tooltip: "View Logs",
-        child: const Icon(Icons.list_alt),
+          ),
+
+          // ── BOTTOM CONTROLS ───────────────────────────────────────────────
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 16, offset: Offset(0, -4))],
+              ),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Drag handle
+                  Container(
+                    width: 40, height: 4,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  // Pit stop row
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(children: [
+                      _buildBreakBtn(ble, "Tea", Icons.local_cafe),
+                      const SizedBox(width: 8),
+                      _buildBreakBtn(ble, "Breakfast", Icons.restaurant),
+                      const SizedBox(width: 8),
+                      _buildBreakBtn(ble, "Lunch", Icons.lunch_dining),
+                      const SizedBox(width: 8),
+                      _buildBreakBtn(ble, "Dinner", Icons.dinner_dining),
+                    ]),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+
+      // No drawer — quick-toggle panel is opened via the menu button in the top bar
+    );
+  }
+
+  // ── HELPERS ───────────────────────────────────────────────────────────────
+
+  Widget _hudRow(IconData icon, String label, String value, Color valueColor) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 13, color: Colors.white54),
+        const SizedBox(width: 4),
+        Text("$label ", style: const TextStyle(color: Colors.white54, fontSize: 11)),
+        Text(value, style: TextStyle(color: valueColor, fontSize: 13, fontWeight: FontWeight.bold, fontFamily: 'monospace')),
+      ],
+    );
+  }
+
+  Color _leanColor(double lean) {
+    if (lean < 20) return Colors.greenAccent;
+    if (lean < 40) return Colors.yellowAccent;
+    return Colors.redAccent;
+  }
+
+  Widget _mapBtn({
+    required IconData icon,
+    Color color = Colors.white,
+    Color iconColor = Colors.black87,
+    required VoidCallback onTap,
+    String? tooltip,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Tooltip(
+        message: tooltip ?? '',
+        child: Container(
+          width: 44, height: 44,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6)],
+          ),
+          child: Icon(icon, color: iconColor, size: 22),
+        ),
       ),
     );
   }
+
+  void _showHazardSheet() {
+    final ble = Get.find<BleController>();
+    Get.bottomSheet(
+      Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text("Report Hazard Ahead",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            Wrap(spacing: 10, runSpacing: 10, children: [
+              _hazardChip(ble, "Pothole", Icons.warning, Colors.orange),
+              _hazardChip(ble, "Gravel", Icons.scatter_plot, Colors.brown),
+              _hazardChip(ble, "Oil Spill", Icons.water_drop, Colors.deepPurple),
+              _hazardChip(ble, "Animal", Icons.pets, Colors.red),
+            ]),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _hazardChip(BleController ble, String type, IconData icon, Color color) {
+    return ActionChip(
+      avatar: Icon(icon, color: Colors.white, size: 16),
+      label: Text(type, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+      backgroundColor: color,
+      onPressed: () { Get.back(); ble.reportHazard(type); },
+    );
+  }
+
+  void _showLogsDialog() {
+    final ble = Get.find<BleController>();
+    Get.dialog(AlertDialog(
+      title: const Text('Hardware Logs'),
+      content: SizedBox(
+        height: 360, width: 300,
+        child: Obx(() => ListView.builder(
+          reverse: true,
+          itemCount: ble.logs.length,
+          itemBuilder: (_, i) {
+            final idx = ble.logs.length - 1 - i;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Text(ble.logs[idx],
+                  style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
+            );
+          },
+        )),
+      ),
+      actions: [TextButton(onPressed: Get.back, child: const Text('Close'))],
+    ));
+  }
+}
+
+// ── Custom painter for the Google Maps-style directional arrow ────────────────
+class _ArrowMarkerPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final r = size.width / 2;
+
+    // Outer white circle
+    canvas.drawCircle(
+      Offset(cx, cy),
+      r,
+      Paint()..color = Colors.white,
+    );
+
+    // Blue filled circle
+    canvas.drawCircle(
+      Offset(cx, cy),
+      r - 3,
+      Paint()..color = const Color(0xFF4285F4),
+    );
+
+    // White directional chevron pointing up (north = 0°)
+    final arrowPath = Path();
+    arrowPath.moveTo(cx, cy - r * 0.55);          // tip
+    arrowPath.lineTo(cx - r * 0.38, cy + r * 0.35); // bottom-left
+    arrowPath.lineTo(cx, cy + r * 0.10);           // inner bottom
+    arrowPath.lineTo(cx + r * 0.38, cy + r * 0.35); // bottom-right
+    arrowPath.close();
+
+    canvas.drawPath(
+      arrowPath,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.fill,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

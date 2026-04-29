@@ -30,19 +30,29 @@ class BleController extends GetxController {
   final Rx<LatLng?> destinationPin = Rx<LatLng?>(null); // Tracks the final destination selected
   final RxList<LatLng> currentRoute = <LatLng>[].obs; // Contains the snaking geometry of the OSRM path
 
+  // --- Heading & Speed (Google Maps-style live arrow) ---
+  // GPS bearing in degrees (0–360, 0 = North). Updated from Geolocator position stream.
+  // Valid only when speed > 1 m/s; below that, gyro-fused heading takes over.
+  final RxDouble myHeading = 0.0.obs;
+  // Speed in km/h from GPS
+  final RxDouble mySpeedKmh = 0.0.obs;
+  // Raw GPS position stream exposed so AnalyticsController can fuse gyro heading
+  final Rx<Position?> lastGpsPosition = Rx<Position?>(null);
+
   // Custom Hardware UUIDs matching the ESP32 code inside Firmware/config.h
   final String SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"; 
   final String RX_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"; // Where our app writes outgoing data
   final String TX_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"; // Where our app listens for incoming data
 
   Timer? _proximityTimer;
+  Timer? _retryTimer;
+  // Track the ever() worker so we can cancel it and avoid leaking multiple listeners
+  Worker? _locationWorker;
 
   @override
   void onInit() {
     super.onInit();
     startScan();
-    
-    // Start group proximity monitoring
     _proximityTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
       _checkGroupProximity();
     });
@@ -51,6 +61,8 @@ class BleController extends GetxController {
   @override
   void onClose() {
     _proximityTimer?.cancel();
+    _retryTimer?.cancel();
+    _locationWorker?.dispose();
     super.onClose();
   }
 
@@ -88,12 +100,23 @@ class BleController extends GetxController {
       if (serviceEnabled) {
         Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
         myLocation.value = LatLng(pos.latitude, pos.longitude);
-        
-        // Subscribe to a continuous GPS stream to update your route dynamically as you drive
+        lastGpsPosition.value = pos;
+
+        // Subscribe to a continuous GPS stream — distanceFilter 3m for smooth arrow movement
         Geolocator.getPositionStream(
-            locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 10)
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.bestForNavigation,
+              distanceFilter: 3, // update every 3 metres for smooth tracking
+            )
         ).listen((Position position) {
             myLocation.value = LatLng(position.latitude, position.longitude);
+            lastGpsPosition.value = position;
+            mySpeedKmh.value = (position.speed * 3.6).clamp(0.0, 300.0); // m/s → km/h
+
+            // Use GPS bearing only when moving fast enough for it to be reliable (>2 km/h)
+            if (position.speed > 0.55 && position.headingAccuracy >= 0) {
+              myHeading.value = position.heading;
+            }
         });
       }
     } catch (e) {
@@ -101,17 +124,28 @@ class BleController extends GetxController {
     }
 
     logs.add("Scanning for RiderLink...");
-    // Sweep the surroundings looking for hardware actively broadcasting their presence
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
-    
+
+    bool found = false;
     FlutterBluePlus.scanResults.listen((results) {
       for (ScanResult r in results) {
-        // If we find our designated hardware match, halt scanning and lock onto them!
         if (r.device.platformName == "RiderLink" || r.device.name == "RiderLink") {
+          found = true;
           connectToDevice(r.device);
           FlutterBluePlus.stopScan();
           break;
         }
+      }
+    });
+
+    // If device not found after scan timeout, retry every 15 seconds
+    // so the user doesn't have to restart the app when the hardware powers on late.
+    _retryTimer = Timer.periodic(const Duration(seconds: 15), (timer) {
+      if (!isConnected.value) {
+        logs.add("RiderLink not found. Retrying scan...");
+        FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
+      } else {
+        timer.cancel(); // Stop retrying once connected
       }
     });
   }
@@ -132,8 +166,20 @@ class BleController extends GetxController {
       device.connectionState.listen((state) {
           if (state == BluetoothConnectionState.disconnected) {
               isConnected.value = false;
-              logs.add("Disconnected!");
+              rxCharacteristic = null;
+              txCharacteristic = null;
               targetDevice = null;
+              logs.add("Disconnected! Will retry scan...");
+              // Re-arm the retry timer so we reconnect automatically
+              _retryTimer?.cancel();
+              _retryTimer = Timer.periodic(const Duration(seconds: 15), (timer) {
+                if (!isConnected.value) {
+                  logs.add("Retrying scan after disconnect...");
+                  FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
+                } else {
+                  timer.cancel();
+                }
+              });
           }
       });
       
@@ -307,7 +353,6 @@ class BleController extends GetxController {
   }
 
   void sendSOS() async {
-    // Generate and fetch all details directly from local app storage 
     final prefs = await SharedPreferences.getInstance();
     String name = prefs.getString('name') ?? 'Unknown Rider';
     String blood = prefs.getString('blood_group') ?? 'N/A';
@@ -316,11 +361,26 @@ class BleController extends GetxController {
     String latStr = myLocation.value != null ? myLocation.value!.latitude.toString() : "0.0";
     String lngStr = myLocation.value != null ? myLocation.value!.longitude.toString() : "0.0";
     
-    // Splice together our proprietary protocol packet format
     String payload = "[SOS]|$name|$blood|$emergency|$latStr|$lngStr";
-    sendMessage(payload);
-    logs.add("Broadcasted SOS!");
-    Get.snackbar("SOS Sent", "Emergency broadcast transmitted to all nearby riders.", backgroundColor: Colors.redAccent, colorText: Colors.white);
+
+    // Guard: only show success if the message was actually written to hardware.
+    // Previously this showed "SOS Sent" even when rxCharacteristic was null.
+    if (rxCharacteristic != null) {
+      await rxCharacteristic!.write(utf8.encode(payload));
+      logs.add("Broadcasted SOS!");
+      Get.snackbar("SOS Sent", "Emergency broadcast transmitted to all nearby riders.",
+          backgroundColor: Colors.redAccent, colorText: Colors.white);
+    } else {
+      logs.add("SOS FAILED — BLE not connected");
+      Get.snackbar(
+        "SOS Failed — No Hardware",
+        "BLE device is not connected. Your SOS was NOT broadcast. Call emergency services directly.",
+        backgroundColor: Colors.red,
+        colorText: Colors.white,
+        duration: const Duration(seconds: 10),
+        snackPosition: SnackPosition.TOP,
+      );
+    }
   }
 
   void sendBreak(String type) async {

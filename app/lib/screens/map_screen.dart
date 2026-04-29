@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -660,7 +661,9 @@ class _ArrowMarkerPainter extends CustomPainter {
     );
 
     // White directional chevron pointing up (north = 0°)
-    final arrowPath = Path();
+    // Use ui.Path explicitly — latlong2 also exports a Path<LatLng> class
+    // which would shadow dart:ui's Path without the prefix.
+    final arrowPath = ui.Path();
     arrowPath.moveTo(cx, cy - r * 0.55);          // tip
     arrowPath.lineTo(cx - r * 0.38, cy + r * 0.35); // bottom-left
     arrowPath.lineTo(cx, cy + r * 0.10);           // inner bottom

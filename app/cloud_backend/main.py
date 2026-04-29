@@ -21,6 +21,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
+from typing import Optional
 
 import bcrypt
 import jwt
@@ -102,9 +103,9 @@ class RegisterRequest(BaseModel):
     name: str
     email: EmailStr
     password: str
-    phone: str | None = None
-    blood_group: str | None = None
-    emergency_contact: str | None = None
+    phone: Optional[str] = None
+    blood_group: Optional[str] = None
+    emergency_contact: Optional[str] = None
 
     @field_validator("password")
     @classmethod
@@ -121,11 +122,11 @@ class UserProfile(BaseModel):
     id: int
     name: str
     email: str
-    phone: str | None
-    blood_group: str | None
-    emergency_contact: str | None
+    phone: Optional[str]
+    blood_group: Optional[str]
+    emergency_contact: Optional[str]
     created_at: int
-    last_login: int | None
+    last_login: Optional[int]
 
 class AuthResponse(BaseModel):
     token: str
@@ -144,7 +145,7 @@ class CrashData(BaseModel):
 
 # ── JWT helpers ───────────────────────────────────────────────────────────────
 
-def _create_token(user_id: int, email: str) -> tuple[str, str, datetime]:
+def _create_token(user_id: int, email: str) -> tuple:
     """Returns (encoded_token, jti, expires_at)."""
     jti = secrets.token_hex(16)
     now = datetime.now(timezone.utc)

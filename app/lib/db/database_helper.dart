@@ -1,5 +1,7 @@
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:path/path.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:math';
 
 class DatabaseHelper {
   static final DatabaseHelper _instance = DatabaseHelper._internal();
@@ -19,14 +21,25 @@ class DatabaseHelper {
 
   Future<Database> _initDatabase() async {
     String path = join(await getDatabasesPath(), 'riderlink_secure.db');
-    
-    // In a real app, the password should be securely managed (e.g., user input or Keystore)
-    // For MVP, we use a hardcoded key or a simple derivative.
-    String password = "riderlink_secret_key"; 
+
+    // Derive a per-install encryption key stored in SharedPreferences.
+    // This is not as strong as Android Keystore but is far better than a
+    // hardcoded string committed to source control. The key is generated once
+    // on first launch and persisted — the database can only be opened on the
+    // same device installation.
+    final prefs = await SharedPreferences.getInstance();
+    String? dbKey = prefs.getString('_db_enc_key');
+    if (dbKey == null) {
+      // Generate a random 32-character alphanumeric key on first launch
+      const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      final rng = Random.secure();
+      dbKey = List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
+      await prefs.setString('_db_enc_key', dbKey);
+    }
 
     return await openDatabase(
       path,
-      password: password,
+      password: dbKey,
       version: 1,
       onCreate: (db, version) async {
         await db.execute('''

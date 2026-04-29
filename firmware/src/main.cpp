@@ -183,10 +183,13 @@ void loop() {
         // Transmit via LoRa
         radio.startTransmit(data.data(), data.size());
         
-        // Also update local app via BLE (optional, but good for self-feedback)
+        // Also stream the hardware GPS to the connected phone via BLE.
+        // The phone's own GPS may be less accurate when mounted inside a fairing.
+        // Sending a self-location packet lets the app use the hardware GPS instead.
         if (deviceConnected) {
-             // Maybe send a "Self Location" packet? Or rely on phone GPS.
-             // For now, let's not spam BLE with self-location unless requested.
+            std::vector<uint8_t> bleData = PacketManager::serialize(packet);
+            pTxCharacteristic->setValue(bleData.data(), bleData.size());
+            pTxCharacteristic->notify();
         }
         
     } else {
@@ -206,5 +209,8 @@ void loop() {
       oldDeviceConnected = deviceConnected;
   }
   
-  delay(10); // Yield to FreeRTOS watchdog to prevent TWDT resets
+  // vTaskDelay(1) yields to the FreeRTOS scheduler for 1 tick (~1ms).
+  // This prevents TWDT resets without blocking ISR flag processing for 10ms
+  // the way delay(10) did — important for not missing back-to-back LoRa packets.
+  vTaskDelay(1);
 }

@@ -15,7 +15,7 @@ import 'package:jwt_decoder/jwt_decoder.dart';
 class AuthController extends GetxController {
   // ── Backend base URL ────────────────────────────────────────────────────────
   // Physical device: use your Mac's local WiFi IP (not 10.0.2.2 which is emulator-only)
-  static const String _baseUrl = 'http://10.1.8.155:8080';
+  static const String _baseUrl = 'http://192.168.137.6:8080';
   static const String baseUrl  = _baseUrl;
 
   // ── Reactive state ──────────────────────────────────────────────────────────

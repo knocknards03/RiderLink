@@ -82,6 +82,9 @@ class BleController extends GetxController {
       myLocation.value      = LatLng(pos.latitude, pos.longitude);
       lastGpsPosition.value = pos;
 
+      // If sim mode is already active, push location immediately on GPS lock
+      if (isSimMode.value) _simPushLocation();
+
       Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.bestForNavigation,
@@ -130,7 +133,11 @@ class BleController extends GetxController {
 
   void _enableSimMode() {
     isSimMode.value    = true;
-    isConnected.value  = true; // treat as "connected" so UI shows green
+    isConnected.value  = true;
+
+    // Initialize pull timestamp to NOW so we only receive NEW events,
+    // not stale events from previous sessions stored in the backend.
+    _simLastPull = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
     Get.snackbar(
       "📡 WiFi Simulation Mode",
@@ -141,12 +148,14 @@ class BleController extends GetxController {
       snackPosition: SnackPosition.TOP,
     );
 
-    // Push our location every 3 seconds
+    // Push location immediately, then every 3 s
+    _simPushLocation();
     _simPushTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       _simPushLocation();
     });
 
-    // Pull other riders' events every 3 seconds
+    // Pull immediately, then every 3 s
+    _simPullEvents();
     _simPullTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       _simPullEvents();
     });
@@ -203,18 +212,25 @@ class BleController extends GetxController {
       if (!auth.isLoggedIn.value) return;
 
       final res = await http.get(
-        Uri.parse(
-            '${AuthController.baseUrl}/sim/pull?since=$_simLastPull'),
+        Uri.parse('${AuthController.baseUrl}/sim/pull?since=$_simLastPull'),
         headers: {'Authorization': 'Bearer ${auth.token}'},
       ).timeout(const Duration(seconds: 5));
 
-      if (res.statusCode != 200) return;
+      if (res.statusCode != 200) {
+        logs.add("Sim pull error: ${res.statusCode}");
+        return;
+      }
 
       final events = jsonDecode(res.body) as List;
-      if (events.isEmpty) return;
 
-      // Update last pull timestamp
-      _simLastPull = (events.last['ts'] as int? ?? _simLastPull);
+      // Always advance the timestamp to now so we never re-process old events
+      final nowTs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (events.isNotEmpty) {
+        _simLastPull = (events.last['ts'] as int? ?? nowTs);
+      } else {
+        // No events — advance to now so next pull only gets truly new events
+        _simLastPull = nowTs;
+      }
 
       for (final e in events) {
         final type    = e['event_type'] as String;
@@ -225,13 +241,14 @@ class BleController extends GetxController {
           case 'location':
             final lat  = (payload['lat'] as num).toDouble();
             final lng  = (payload['lng'] as num).toDouble();
+            final name = payload['name'] as String? ?? 'Rider';
             riderLocations[userId] = [lat, lng];
-            logs.add("Sim: Rider $userId @ $lat,$lng");
+            logs.add("📍 Rider $name ($userId) @ ${lat.toStringAsFixed(4)},${lng.toStringAsFixed(4)}");
             break;
 
           case 'message':
             final msg = payload['msg'] as String? ?? '';
-            logs.add("Sim Msg: $msg");
+            logs.add("💬 Sim Msg: $msg");
             _handleMessage(msg);
             break;
 
@@ -241,6 +258,7 @@ class BleController extends GetxController {
             final emergency = payload['emergency'] as String? ?? '';
             final lat       = payload['lat']       as String? ?? '0';
             final lng       = payload['lng']       as String? ?? '0';
+            logs.add("🚨 SOS from $name");
             _showSosDialog(name, blood, emergency, lat, lng);
             break;
 
@@ -253,13 +271,15 @@ class BleController extends GetxController {
               'type': hType, 'name': name,
               'lat': lat, 'lng': lng, 'time': DateTime.now(),
             });
-            Get.snackbar("Hazard Ahead", "$name reported a $hType!",
+            Get.snackbar("⚠ Hazard Ahead", "$name reported a $hType!",
                 backgroundColor: Colors.redAccent, colorText: Colors.white,
                 snackPosition: SnackPosition.TOP);
             break;
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      logs.add("Sim pull exception: $e");
+    }
   }
 
   // ── BLE hardware path ───────────────────────────────────────────────────────

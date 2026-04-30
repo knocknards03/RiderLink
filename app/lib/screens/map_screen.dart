@@ -314,11 +314,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   ),
                   const SizedBox(width: 10),
 
-                  // Speed + BLE status pill
+                  // Speed + BLE/WiFi status pill
                   Expanded(
                     child: Obx(() {
-                      final speed = ble.mySpeedKmh.value;
+                      final speed     = ble.mySpeedKmh.value;
                       final connected = ble.isConnected.value;
+                      final simMode   = ble.isSimMode.value;
                       return Container(
                         height: 44,
                         padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -340,17 +341,25 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                             ]),
                             Row(children: [
                               Icon(
-                                connected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+                                simMode
+                                    ? Icons.wifi
+                                    : connected
+                                        ? Icons.bluetooth_connected
+                                        : Icons.bluetooth_disabled,
                                 size: 16,
-                                color: connected ? Colors.green : Colors.red,
+                                color: connected
+                                    ? (simMode ? Colors.blueAccent : Colors.green)
+                                    : Colors.red,
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                connected ? "LoRa" : "No HW",
+                                simMode ? "WiFi" : connected ? "LoRa" : "No HW",
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
-                                  color: connected ? Colors.green : Colors.red,
+                                  color: connected
+                                      ? (simMode ? Colors.blueAccent : Colors.green)
+                                      : Colors.red,
                                 ),
                               ),
                             ]),

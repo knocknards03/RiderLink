@@ -711,8 +711,51 @@ def create_post(req: FeedPostCreate, payload: dict = Depends(require_auth)):
                        author_initials=_initials(name))
 
 
+# ── Simulation / WiFi-bridge endpoints (no ESP32 needed) ─────────────────────
+# Two phones exchange location, messages, SOS, hazards through the backend.
+# Each phone polls /sim/pull every 3 seconds to get events from other riders.
+
+import threading
+_sim_lock = threading.Lock()
+_sim_events: list = []          # shared in-memory event bus (resets on restart)
+_SIM_MAX_AGE_S = 30             # discard events older than 30 seconds
+
+class SimEvent(BaseModel):
+    user_id: int
+    event_type: str             # location | message | sos | hazard
+    payload: dict
+    ts: Optional[int] = None    # filled server-side
+
+@app.post("/sim/push", status_code=200)
+def sim_push(event: SimEvent, payload_auth: dict = Depends(require_auth)):
+    """Phone pushes an event (location update, message, SOS, hazard)."""
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    with _sim_lock:
+        _sim_events.append({
+            "user_id":    event.user_id,
+            "event_type": event.event_type,
+            "payload":    event.payload,
+            "ts":         now_ts,
+        })
+        # Prune old events to keep memory bounded
+        cutoff = now_ts - _SIM_MAX_AGE_S
+        _sim_events[:] = [e for e in _sim_events if e["ts"] >= cutoff]
+    return {"status": "ok", "ts": now_ts}
+
+@app.get("/sim/pull", response_model=list)
+def sim_pull(since: int = 0, payload_auth: dict = Depends(require_auth)):
+    """Phone pulls all events from OTHER riders since a given timestamp."""
+    caller_id = int(payload_auth["sub"])
+    with _sim_lock:
+        return [
+            e for e in _sim_events
+            if e["ts"] > since and e["user_id"] != caller_id
+        ]
+
+
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
-

@@ -15,8 +15,8 @@ import 'package:jwt_decoder/jwt_decoder.dart';
 class AuthController extends GetxController {
   // ── Backend base URL ────────────────────────────────────────────────────────
   // Physical device: use your Mac's local WiFi IP (not 10.0.2.2 which is emulator-only)
-  static const String _baseUrl = 'http://10.102.77.9:8080';
-  static const String baseUrl  = _baseUrl; // public alias for other controllers
+  static const String _baseUrl = 'http://10.1.8.155:8080';
+  static const String baseUrl  = _baseUrl;
 
   // ── Reactive state ──────────────────────────────────────────────────────────
   final RxBool isLoggedIn   = false.obs;

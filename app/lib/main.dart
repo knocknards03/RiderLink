@@ -6,6 +6,7 @@ import 'controllers/ble_controller.dart';
 import 'controllers/safety_controller.dart';
 import 'controllers/analytics_controller.dart';
 import 'controllers/settings_controller.dart';
+import 'controllers/community_controller.dart';
 import 'db/database_helper.dart';
 
 void main() async {
@@ -29,6 +30,8 @@ void main() async {
   Get.put(SafetyController());
   Get.put(AnalyticsController());
   Get.put(SettingsController());
+  // Community — registered after auth so it can find AuthController
+  Get.put(CommunityController());
 
   runApp(const MyApp());
 }

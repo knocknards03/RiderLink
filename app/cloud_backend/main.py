@@ -93,6 +93,73 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         """)
+        # ── Community tables ──────────────────────────────────────────────
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT    NOT NULL,
+                description  TEXT,
+                banner_color TEXT    DEFAULT '#E91E63',
+                creator_id   INTEGER NOT NULL,
+                created_at   INTEGER NOT NULL,
+                FOREIGN KEY (creator_id) REFERENCES users(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id  INTEGER NOT NULL,
+                user_id   INTEGER NOT NULL,
+                role      TEXT    DEFAULT 'member',
+                joined_at INTEGER NOT NULL,
+                UNIQUE(group_id, user_id),
+                FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id)  REFERENCES users(id)  ON DELETE CASCADE
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS rides (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id       INTEGER NOT NULL,
+                creator_id     INTEGER NOT NULL,
+                title          TEXT    NOT NULL,
+                description    TEXT,
+                start_location TEXT,
+                end_location   TEXT,
+                start_lat      REAL,
+                start_lng      REAL,
+                end_lat        REAL,
+                end_lng        REAL,
+                scheduled_at   INTEGER NOT NULL,
+                status         TEXT    DEFAULT 'upcoming',
+                created_at     INTEGER NOT NULL,
+                FOREIGN KEY (group_id)   REFERENCES groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (creator_id) REFERENCES users(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS ride_participants (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                ride_id   INTEGER NOT NULL,
+                user_id   INTEGER NOT NULL,
+                joined_at INTEGER NOT NULL,
+                UNIQUE(ride_id, user_id),
+                FOREIGN KEY (ride_id) REFERENCES rides(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS feed_posts (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                group_id   INTEGER,
+                post_type  TEXT    DEFAULT 'update',
+                content    TEXT    NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id)  REFERENCES users(id)  ON DELETE CASCADE,
+                FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE SET NULL
+            )
+        """)
     logger.info("Database initialised at %s", DB_PATH)
 
 init_db()
@@ -336,7 +403,316 @@ def predict_crash(data: CrashData, payload: dict = Depends(require_auth)):
     return {"status": "success", "crash_detected": False, "confidence": 0.95}
 
 
+# ── Community endpoints ───────────────────────────────────────────────────────
+
+class GroupCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    banner_color: Optional[str] = "#E91E63"
+
+class GroupOut(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    banner_color: Optional[str]
+    creator_id: int
+    created_at: int
+    member_count: int
+    is_member: bool
+
+class RideCreate(BaseModel):
+    group_id: int
+    title: str
+    description: Optional[str] = None
+    start_location: Optional[str] = None
+    end_location: Optional[str] = None
+    start_lat: Optional[float] = None
+    start_lng: Optional[float] = None
+    end_lat: Optional[float] = None
+    end_lng: Optional[float] = None
+    scheduled_at: int  # Unix timestamp ms
+
+class RideOut(BaseModel):
+    id: int
+    group_id: int
+    creator_id: int
+    title: str
+    description: Optional[str]
+    start_location: Optional[str]
+    end_location: Optional[str]
+    start_lat: Optional[float]
+    start_lng: Optional[float]
+    end_lat: Optional[float]
+    end_lng: Optional[float]
+    scheduled_at: int
+    status: str
+    created_at: int
+    participant_count: int
+    is_joined: bool
+    creator_name: Optional[str]
+
+class FeedPostCreate(BaseModel):
+    group_id: Optional[int] = None
+    post_type: Optional[str] = "update"
+    content: str
+
+class FeedPostOut(BaseModel):
+    id: int
+    user_id: int
+    group_id: Optional[int]
+    post_type: str
+    content: str
+    created_at: int
+    author_name: str
+    author_initials: str
+
+def _initials(name: str) -> str:
+    parts = name.strip().split()
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][0].upper()
+    return (parts[0][0] + parts[1][0]).upper()
+
+
+# ── Groups ────────────────────────────────────────────────────────────────────
+
+@app.post("/groups", response_model=GroupOut, status_code=201)
+def create_group(req: GroupCreate, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    now_ts  = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO groups (name, description, banner_color, creator_id, created_at) VALUES (?,?,?,?,?)",
+            (req.name, req.description, req.banner_color, user_id, now_ts),
+        )
+        group_id = cur.lastrowid
+        # Creator auto-joins as admin
+        db.execute(
+            "INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+            (group_id, user_id, "admin", now_ts),
+        )
+    return GroupOut(id=group_id, name=req.name, description=req.description,
+                    banner_color=req.banner_color, creator_id=user_id,
+                    created_at=now_ts, member_count=1, is_member=True)
+
+
+@app.get("/groups", response_model=list)
+def list_my_groups(payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT g.id, g.name, g.description, g.banner_color, g.creator_id, g.created_at,
+                   (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) AS member_count,
+                   1 AS is_member
+            FROM groups g
+            JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = ?
+            ORDER BY g.created_at DESC
+        """, (user_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/groups/discover", response_model=list)
+def discover_groups(payload: dict = Depends(require_auth)):
+    """Return groups the user has NOT joined yet."""
+    user_id = int(payload["sub"])
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT g.id, g.name, g.description, g.banner_color, g.creator_id, g.created_at,
+                   (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) AS member_count,
+                   0 AS is_member
+            FROM groups g
+            WHERE g.id NOT IN (
+                SELECT group_id FROM group_members WHERE user_id = ?
+            )
+            ORDER BY member_count DESC
+            LIMIT 30
+        """, (user_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/groups/{group_id}/join", status_code=200)
+def join_group(group_id: int, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    now_ts  = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        grp = db.execute("SELECT id FROM groups WHERE id=?", (group_id,)).fetchone()
+        if not grp:
+            raise HTTPException(404, "Group not found")
+        db.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+            (group_id, user_id, "member", now_ts),
+        )
+        # Post a feed entry
+        db.execute(
+            "INSERT INTO feed_posts (user_id, group_id, post_type, content, created_at) VALUES (?,?,?,?,?)",
+            (user_id, group_id, "joined", "joined the group", now_ts),
+        )
+    return {"status": "joined"}
+
+
+@app.delete("/groups/{group_id}/leave", status_code=200)
+def leave_group(group_id: int, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    with get_db() as db:
+        db.execute(
+            "DELETE FROM group_members WHERE group_id=? AND user_id=?",
+            (group_id, user_id),
+        )
+    return {"status": "left"}
+
+
+@app.get("/groups/{group_id}/members", response_model=list)
+def group_members(group_id: int, payload: dict = Depends(require_auth)):
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT u.id, u.name, u.blood_group, gm.role, gm.joined_at
+            FROM group_members gm
+            JOIN users u ON u.id = gm.user_id
+            WHERE gm.group_id = ?
+            ORDER BY gm.role DESC, gm.joined_at ASC
+        """, (group_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Rides ─────────────────────────────────────────────────────────────────────
+
+@app.post("/rides", response_model=RideOut, status_code=201)
+def create_ride(req: RideCreate, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    now_ts  = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        # Must be a member of the group
+        mem = db.execute(
+            "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
+            (req.group_id, user_id),
+        ).fetchone()
+        if not mem:
+            raise HTTPException(403, "You must be a group member to create a ride")
+        cur = db.execute("""
+            INSERT INTO rides
+              (group_id, creator_id, title, description, start_location, end_location,
+               start_lat, start_lng, end_lat, end_lng, scheduled_at, status, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (req.group_id, user_id, req.title, req.description,
+              req.start_location, req.end_location,
+              req.start_lat, req.start_lng, req.end_lat, req.end_lng,
+              req.scheduled_at, "upcoming", now_ts))
+        ride_id = cur.lastrowid
+        # Creator auto-joins
+        db.execute(
+            "INSERT INTO ride_participants (ride_id, user_id, joined_at) VALUES (?,?,?)",
+            (ride_id, user_id, now_ts),
+        )
+        # Feed post
+        db.execute(
+            "INSERT INTO feed_posts (user_id, group_id, post_type, content, created_at) VALUES (?,?,?,?,?)",
+            (user_id, req.group_id, "ride_created", f"created a new ride: {req.title}", now_ts),
+        )
+        creator_row = db.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
+    return RideOut(id=ride_id, group_id=req.group_id, creator_id=user_id,
+                   title=req.title, description=req.description,
+                   start_location=req.start_location, end_location=req.end_location,
+                   start_lat=req.start_lat, start_lng=req.start_lng,
+                   end_lat=req.end_lat, end_lng=req.end_lng,
+                   scheduled_at=req.scheduled_at, status="upcoming",
+                   created_at=now_ts, participant_count=1, is_joined=True,
+                   creator_name=creator_row["name"] if creator_row else None)
+
+
+@app.get("/groups/{group_id}/rides", response_model=list)
+def group_rides(group_id: int, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT r.*,
+                   (SELECT COUNT(*) FROM ride_participants WHERE ride_id = r.id) AS participant_count,
+                   (SELECT COUNT(*) FROM ride_participants WHERE ride_id = r.id AND user_id = ?) AS is_joined,
+                   u.name AS creator_name
+            FROM rides r
+            JOIN users u ON u.id = r.creator_id
+            WHERE r.group_id = ?
+            ORDER BY r.scheduled_at ASC
+        """, (user_id, group_id)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/rides/{ride_id}/join", status_code=200)
+def join_ride(ride_id: int, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    now_ts  = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        ride = db.execute("SELECT group_id, title FROM rides WHERE id=?", (ride_id,)).fetchone()
+        if not ride:
+            raise HTTPException(404, "Ride not found")
+        db.execute(
+            "INSERT OR IGNORE INTO ride_participants (ride_id, user_id, joined_at) VALUES (?,?,?)",
+            (ride_id, user_id, now_ts),
+        )
+        db.execute(
+            "INSERT INTO feed_posts (user_id, group_id, post_type, content, created_at) VALUES (?,?,?,?,?)",
+            (user_id, ride["group_id"], "ride_joined", f"is joining the ride: {ride['title']}", now_ts),
+        )
+    return {"status": "joined"}
+
+
+@app.delete("/rides/{ride_id}/leave", status_code=200)
+def leave_ride(ride_id: int, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    with get_db() as db:
+        db.execute(
+            "DELETE FROM ride_participants WHERE ride_id=? AND user_id=?",
+            (ride_id, user_id),
+        )
+    return {"status": "left"}
+
+
+# ── Feed ──────────────────────────────────────────────────────────────────────
+
+@app.get("/feed", response_model=list)
+def get_feed(payload: dict = Depends(require_auth), limit: int = 30, offset: int = 0):
+    """Global feed of all groups the user belongs to."""
+    user_id = int(payload["sub"])
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT fp.id, fp.user_id, fp.group_id, fp.post_type, fp.content, fp.created_at,
+                   u.name AS author_name
+            FROM feed_posts fp
+            JOIN users u ON u.id = fp.user_id
+            WHERE fp.group_id IN (
+                SELECT group_id FROM group_members WHERE user_id = ?
+            ) OR fp.group_id IS NULL
+            ORDER BY fp.created_at DESC
+            LIMIT ? OFFSET ?
+        """, (user_id, limit, offset)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["author_initials"] = _initials(d["author_name"])
+        result.append(d)
+    return result
+
+
+@app.post("/feed", response_model=FeedPostOut, status_code=201)
+def create_post(req: FeedPostCreate, payload: dict = Depends(require_auth)):
+    user_id = int(payload["sub"])
+    now_ts  = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO feed_posts (user_id, group_id, post_type, content, created_at) VALUES (?,?,?,?,?)",
+            (user_id, req.group_id, req.post_type, req.content, now_ts),
+        )
+        post_id = cur.lastrowid
+        author  = db.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
+    name = author["name"] if author else "Rider"
+    return FeedPostOut(id=post_id, user_id=user_id, group_id=req.group_id,
+                       post_type=req.post_type, content=req.content,
+                       created_at=now_ts, author_name=name,
+                       author_initials=_initials(name))
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
+

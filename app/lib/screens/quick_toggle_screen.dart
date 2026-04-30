@@ -8,6 +8,7 @@ import 'login_screen.dart';
 import 'profile_screen.dart';
 import 'trip_replay_screen.dart';
 import 'garage_screen.dart';
+import 'community_screen.dart';
 
 /// Slide-up bottom sheet with rider info, live telemetry, quick toggles,
 /// mesh chat and sign-out. Open it via [QuickTogglePanel.show()].
@@ -371,6 +372,9 @@ class _QuickToggleSheet extends StatelessWidget {
       const SizedBox(width: 10),
       _navTile(Icons.garage_outlined, 'Garage',
           () { Get.back(); Get.to(() => const GarageScreen()); }),
+      const SizedBox(width: 10),
+      _navTile(Icons.group, 'Community',
+          () { Get.back(); Get.to(() => const CommunityScreen()); }),
       const SizedBox(width: 10),
       _navTile(Icons.person_outline, 'Profile',
           () { Get.back(); Get.to(() => const ProfileScreen()); }),

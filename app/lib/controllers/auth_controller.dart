@@ -16,6 +16,7 @@ class AuthController extends GetxController {
   // ── Backend base URL ────────────────────────────────────────────────────────
   // Physical device: use your Mac's local WiFi IP (not 10.0.2.2 which is emulator-only)
   static const String _baseUrl = 'http://10.102.77.9:8080';
+  static const String baseUrl  = _baseUrl; // public alias for other controllers
 
   // ── Reactive state ──────────────────────────────────────────────────────────
   final RxBool isLoggedIn   = false.obs;
@@ -32,6 +33,7 @@ class AuthController extends GetxController {
 
   // Raw JWT — kept private; exposed only via isLoggedIn / userId
   String? _token;
+  String get token => _token ?? ''; // public read-only accessor
 
   // SharedPreferences keys
   static const _kToken     = '_auth_token';

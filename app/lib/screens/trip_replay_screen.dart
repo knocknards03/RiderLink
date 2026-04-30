@@ -3,6 +3,8 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:get/get.dart';
 import '../db/database_helper.dart';
+import '../controllers/community_controller.dart';
+import 'community_screen.dart';
 
 class TripReplayScreen extends StatefulWidget {
   const TripReplayScreen({super.key});
@@ -114,10 +116,12 @@ class _TripCard extends StatelessWidget {
     final startMs  = trip['start_time'] as int? ?? 0;
     final endMs    = trip['end_time']   as int? ?? 0;
     final maxLean  = (trip['max_lean_angle'] as num?)?.toDouble() ?? 0.0;
+    final distKm   = (trip['distance_km'] as num?)?.toDouble() ?? 0.0;
+    final topSpeed = (trip['top_speed'] as num?)?.toDouble() ?? 0.0;
     final tripId   = trip['id'] as int;
 
     return GestureDetector(
-      onTap: () => Get.to(() => _TripReplayMapScreen(tripId: tripId)),
+      onTap: () => Get.to(() => _TripReplayMapScreen(tripId: tripId, trip: trip)),
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(16),
@@ -126,48 +130,110 @@ class _TripCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: Colors.white10),
         ),
-        child: Row(
+        child: Column(
           children: [
-            // Icon
-            Container(
-              width: 48, height: 48,
-              decoration: BoxDecoration(
-                color: Colors.redAccent.withOpacity(0.12),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.motorcycle, color: Colors.redAccent, size: 24),
-            ),
-            const SizedBox(width: 14),
-            // Info
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    formatDate(startMs),
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14),
+            Row(
+              children: [
+                Container(
+                  width: 48, height: 48,
+                  decoration: BoxDecoration(
+                    color: Colors.redAccent.withOpacity(0.12),
+                    shape: BoxShape.circle,
                   ),
-                  const SizedBox(height: 4),
-                  Row(children: [
-                    _pill(Icons.timer_outlined,
-                        formatDuration(startMs, endMs), Colors.blueAccent),
-                    const SizedBox(width: 8),
-                    _pill(Icons.rotate_90_degrees_ccw,
-                        '${maxLean.toStringAsFixed(1)}° lean',
-                        maxLean > 40 ? Colors.redAccent : Colors.greenAccent),
-                  ]),
-                ],
+                  child: const Icon(Icons.motorcycle, color: Colors.redAccent, size: 24),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        formatDate(startMs),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14),
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(spacing: 8, children: [
+                        _pill(Icons.timer_outlined,
+                            formatDuration(startMs, endMs), Colors.blueAccent),
+                        _pill(Icons.rotate_90_degrees_ccw,
+                            '${maxLean.toStringAsFixed(1)}°',
+                            maxLean > 40 ? Colors.redAccent : Colors.greenAccent),
+                        if (distKm > 0)
+                          _pill(Icons.route,
+                              '${distKm.toStringAsFixed(1)} km', Colors.orangeAccent),
+                        if (topSpeed > 0)
+                          _pill(Icons.speed,
+                              '${topSpeed.toStringAsFixed(0)} km/h', Colors.purpleAccent),
+                      ]),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.play_circle_outline,
+                    color: Colors.white38, size: 28),
+              ],
+            ),
+            // Share to community button
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: () => _shareToRide(context, trip),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.blueAccent.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.blueAccent.withOpacity(0.3)),
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.group_add, color: Colors.blueAccent, size: 15),
+                    SizedBox(width: 6),
+                    Text('Share as Community Ride',
+                        style: TextStyle(color: Colors.blueAccent,
+                            fontSize: 12, fontWeight: FontWeight.w600)),
+                  ],
+                ),
               ),
             ),
-            const Icon(Icons.play_circle_outline,
-                color: Colors.white38, size: 28),
           ],
         ),
       ),
     );
+  }
+
+  void _shareToRide(BuildContext context, Map<String, dynamic> trip) {
+    try {
+      final community = Get.find<CommunityController>();
+      if (community.myGroups.isEmpty) {
+        Get.snackbar('No Groups', 'Join or create a community group first.',
+            backgroundColor: Colors.orange, colorText: Colors.white);
+        return;
+      }
+      final startMs = trip['start_time'] as int? ?? 0;
+      final dt = DateTime.fromMillisecondsSinceEpoch(startMs);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun',
+                      'Jul','Aug','Sep','Oct','Nov','Dec'];
+      final dateStr = '${dt.day} ${months[dt.month-1]} ${dt.year}';
+      Get.bottomSheet(
+        CreateRideSheet(
+          community: community,
+          prefillTitle: 'Ride on $dateStr',
+          prefillDesc:
+              'Distance: ${(trip['distance_km'] as num?)?.toStringAsFixed(1) ?? "?"} km  '
+              '· Max lean: ${(trip['max_lean_angle'] as num?)?.toStringAsFixed(1) ?? "?"}°  '
+              '· Top speed: ${(trip['top_speed'] as num?)?.toStringAsFixed(0) ?? "?"} km/h',
+        ),
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+      );
+    } catch (_) {
+      Get.snackbar('Login Required', 'Sign in to share rides with your community.',
+          backgroundColor: Colors.orange, colorText: Colors.white);
+    }
   }
 
   Widget _pill(IconData icon, String label, Color color) {
@@ -183,7 +249,8 @@ class _TripCard extends StatelessWidget {
 
 class _TripReplayMapScreen extends StatefulWidget {
   final int tripId;
-  const _TripReplayMapScreen({required this.tripId});
+  final Map<String, dynamic> trip;
+  const _TripReplayMapScreen({required this.tripId, required this.trip});
 
   @override
   State<_TripReplayMapScreen> createState() => _TripReplayMapScreenState();
@@ -192,7 +259,6 @@ class _TripReplayMapScreen extends StatefulWidget {
 class _TripReplayMapScreenState extends State<_TripReplayMapScreen> {
   List<LatLng> _route = [];
   bool _loading = true;
-  Map<String, dynamic>? _trip;
 
   @override
   void initState() {
@@ -203,8 +269,6 @@ class _TripReplayMapScreenState extends State<_TripReplayMapScreen> {
   Future<void> _loadRoute() async {
     final db = await DatabaseHelper().database;
 
-    final tripRows = await db.query(
-      'trips', where: 'id = ?', whereArgs: [widget.tripId]);
     final pointRows = await db.query(
       'route_points',
       where: 'trip_id = ?',
@@ -217,9 +281,6 @@ class _TripReplayMapScreenState extends State<_TripReplayMapScreen> {
         .toList();
 
     setState(() {
-      _trip = tripRows.isNotEmpty
-          ? Map<String, dynamic>.from(tripRows.first)
-          : null;
       _route = points;
       _loading = false;
     });
@@ -241,8 +302,8 @@ class _TripReplayMapScreenState extends State<_TripReplayMapScreen> {
               child: CircularProgressIndicator(color: Colors.redAccent))
           : Column(
               children: [
-                // Stats bar
-                if (_trip != null) _StatsBar(trip: _trip!),
+                // Stats bar — use trip data passed from list
+                _StatsBar(trip: widget.trip),
                 // Map
                 Expanded(
                   child: _route.isEmpty
@@ -315,9 +376,11 @@ class _StatsBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final startMs = trip['start_time'] as int? ?? 0;
-    final endMs   = trip['end_time']   as int? ?? 0;
-    final maxLean = (trip['max_lean_angle'] as num?)?.toDouble() ?? 0.0;
+    final startMs  = trip['start_time'] as int? ?? 0;
+    final endMs    = trip['end_time']   as int? ?? 0;
+    final maxLean  = (trip['max_lean_angle'] as num?)?.toDouble() ?? 0.0;
+    final distKm   = (trip['distance_km'] as num?)?.toDouble() ?? 0.0;
+    final topSpeed = (trip['top_speed'] as num?)?.toDouble() ?? 0.0;
 
     final dur = endMs > 0
         ? Duration(milliseconds: endMs - startMs)
@@ -328,7 +391,7 @@ class _StatsBar extends StatelessWidget {
 
     return Container(
       color: const Color(0xFF141414),
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
@@ -336,9 +399,10 @@ class _StatsBar extends StatelessWidget {
           _stat(Icons.rotate_90_degrees_ccw,
               '${maxLean.toStringAsFixed(1)}°', 'Max Lean',
               maxLean > 40 ? Colors.redAccent : Colors.greenAccent),
-          _stat(Icons.location_on_outlined,
-              '${(trip['distance_km'] as num?)?.toStringAsFixed(1) ?? '0.0'} km',
-              'Distance', Colors.orangeAccent),
+          _stat(Icons.route,
+              '${distKm.toStringAsFixed(1)} km', 'Distance', Colors.orangeAccent),
+          _stat(Icons.speed,
+              '${topSpeed.toStringAsFixed(0)} km/h', 'Top Speed', Colors.purpleAccent),
         ],
       ),
     );
@@ -356,3 +420,4 @@ class _StatsBar extends StatelessWidget {
     ]);
   }
 }
+

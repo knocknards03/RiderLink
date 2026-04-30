@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import '../controllers/auth_controller.dart';
 import '../controllers/ble_controller.dart';
 import '../controllers/analytics_controller.dart';
+import '../controllers/safety_controller.dart';
 import '../controllers/settings_controller.dart';
 import 'login_screen.dart';
 import 'profile_screen.dart';
@@ -52,6 +53,7 @@ class _QuickToggleSheet extends StatelessWidget {
     final ble      = Get.find<BleController>();
     final analytics = Get.find<AnalyticsController>();
     final settings = Get.find<SettingsController>();
+    final safety   = Get.find<SafetyController>();
 
     return Container(
       decoration: const BoxDecoration(
@@ -82,7 +84,7 @@ class _QuickToggleSheet extends StatelessWidget {
             const SizedBox(height: 20),
 
             // ── Toggle grid ───────────────────────────────────────────────
-            _buildToggleGrid(settings),
+            _buildToggleGrid(settings, safety),
             const SizedBox(height: 20),
 
             // ── Quick nav ─────────────────────────────────────────────────
@@ -275,7 +277,7 @@ class _QuickToggleSheet extends StatelessWidget {
 
   // ── Toggle grid ────────────────────────────────────────────────────────────
 
-  Widget _buildToggleGrid(SettingsController settings) {
+  Widget _buildToggleGrid(SettingsController settings, SafetyController safety) {
     return GridView.count(
       crossAxisCount: 4,
       shrinkWrap: true,
@@ -284,16 +286,13 @@ class _QuickToggleSheet extends StatelessWidget {
       crossAxisSpacing: 10,
       childAspectRatio: 0.9,
       children: [
-        // Follow mode — plain bool, no Obx needed
+        // Follow mode
         _toggleTile(
           icon: Icons.navigation,
           label: 'Follow',
           active: followMode,
           activeColor: const Color(0xFF4285F4),
-          onTap: () {
-            onToggleFollow();
-            Get.back();
-          },
+          onTap: () { onToggleFollow(); Get.back(); },
         ),
         // Glove mode
         Obx(() => _toggleTile(
@@ -311,13 +310,13 @@ class _QuickToggleSheet extends StatelessWidget {
           activeColor: Colors.purple,
           onTap: settings.toggleVoiceNav,
         )),
-        // Curvy routes
+        // Crash detection shield
         Obx(() => _toggleTile(
-          icon: Icons.route,
-          label: 'Curvy',
-          active: settings.preferCurvyRoutes.value,
-          activeColor: Colors.teal,
-          onTap: settings.toggleCurvyRoutes,
+          icon: safety.isMonitoring.value ? Icons.shield : Icons.shield_outlined,
+          label: 'Shield',
+          active: safety.isMonitoring.value,
+          activeColor: Colors.greenAccent,
+          onTap: safety.toggleMonitoring,
         )),
       ],
     );

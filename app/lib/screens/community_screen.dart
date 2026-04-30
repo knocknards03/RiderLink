@@ -938,7 +938,15 @@ class _CreateGroupSheetState extends State<CreateGroupSheet> {
 class CreateRideSheet extends StatefulWidget {
   final CommunityController community;
   final int? preselectedGroupId;
-  const CreateRideSheet({super.key, required this.community, this.preselectedGroupId});
+  final String? prefillTitle;
+  final String? prefillDesc;
+  const CreateRideSheet({
+    super.key,
+    required this.community,
+    this.preselectedGroupId,
+    this.prefillTitle,
+    this.prefillDesc,
+  });
   @override
   State<CreateRideSheet> createState() => _CreateRideSheetState();
 }
@@ -958,6 +966,9 @@ class _CreateRideSheetState extends State<CreateRideSheet> {
         (widget.community.myGroups.isNotEmpty
             ? widget.community.myGroups.first.id
             : null);
+    // Pre-fill from trip share
+    if (widget.prefillTitle != null) _titleCtrl.text = widget.prefillTitle!;
+    if (widget.prefillDesc  != null) _descCtrl.text  = widget.prefillDesc!;
   }
 
   @override

@@ -138,11 +138,14 @@ class DatabaseHelper {
     });
   }
 
-  Future<void> updateTripEnd(int tripId, int endTime, double maxLean) async {
+  Future<void> updateTripEnd(int tripId, int endTime, double maxLean,
+      {double distanceKm = 0.0, double topSpeedKmh = 0.0}) async {
     final db = await database;
     await db.update('trips', {
       'end_time': endTime,
-      'max_lean_angle': maxLean
+      'max_lean_angle': maxLean,
+      'distance_km': distanceKm,
+      'top_speed': topSpeedKmh,
     }, where: 'id = ?', whereArgs: [tripId]);
   }
 

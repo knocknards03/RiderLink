@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:get/get.dart';
 import '../controllers/ble_controller.dart';
 import '../controllers/analytics_controller.dart';
+import '../controllers/safety_controller.dart';
 import '../controllers/settings_controller.dart';
 import '../utils/navigation_service.dart';
 import 'quick_toggle_screen.dart';
@@ -398,34 +399,83 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             right: 12,
             child: SafeArea(
               child: Obx(() {
-                final lean = analytics.currentLeanAngle.value;
-                final maxLean = analytics.maxLeanAngle.value;
-                final gForce = analytics.currentGForce.value;
-                final heading = analytics.fusedHeading.value;
+                final analytics = Get.find<AnalyticsController>();
+                final safety    = Get.find<SafetyController>();
+                final lean      = analytics.currentLeanAngle.value;
+                final maxLean   = analytics.maxLeanAngle.value;
+                final gForce    = analytics.currentGForce.value;
+                final heading   = analytics.fusedHeading.value;
+                final dist      = analytics.tripDistanceKm.value;
+                final topSpd    = analytics.topSpeedKmh.value;
+                final monitoring = safety.isMonitoring.value;
 
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.78),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: Colors.white12),
-                    boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 10)],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      _hudRow(Icons.rotate_90_degrees_ccw, "Lean",
-                          "${lean.toStringAsFixed(1)}°", _leanColor(lean)),
-                      const SizedBox(height: 4),
-                      _hudRow(Icons.arrow_upward, "Max",
-                          "${maxLean.toStringAsFixed(1)}°", Colors.redAccent),
-                      const SizedBox(height: 4),
-                      _hudRow(Icons.bolt, "G",
-                          "${gForce.toStringAsFixed(2)}G", Colors.greenAccent),
-                      const SizedBox(height: 4),
-                      _hudRow(Icons.explore, "HDG",
-                          "${heading.toStringAsFixed(0)}°", Colors.cyanAccent),
-                    ],
+                return GestureDetector(
+                  // Tap HUD to toggle crash detection on/off
+                  onLongPress: safety.toggleMonitoring,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.82),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: monitoring ? Colors.white12 : Colors.orange.withOpacity(0.5),
+                        width: monitoring ? 1 : 1.5,
+                      ),
+                      boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 10)],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        // Crash detection status pill
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          margin: const EdgeInsets.only(bottom: 6),
+                          decoration: BoxDecoration(
+                            color: monitoring
+                                ? Colors.green.withOpacity(0.2)
+                                : Colors.orange.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(
+                              monitoring ? Icons.shield : Icons.shield_outlined,
+                              size: 10,
+                              color: monitoring ? Colors.greenAccent : Colors.orange,
+                            ),
+                            const SizedBox(width: 3),
+                            Text(
+                              monitoring ? 'CRASH ON' : 'CRASH OFF',
+                              style: TextStyle(
+                                color: monitoring ? Colors.greenAccent : Colors.orange,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ]),
+                        ),
+                        _hudRow(Icons.rotate_90_degrees_ccw, "Lean",
+                            "${lean.toStringAsFixed(1)}°", _leanColor(lean)),
+                        const SizedBox(height: 4),
+                        _hudRow(Icons.arrow_upward, "Max",
+                            "${maxLean.toStringAsFixed(1)}°", Colors.redAccent),
+                        const SizedBox(height: 4),
+                        _hudRow(Icons.bolt, "G",
+                            "${gForce.toStringAsFixed(2)}G", Colors.greenAccent),
+                        const SizedBox(height: 4),
+                        _hudRow(Icons.explore, "HDG",
+                            "${heading.toStringAsFixed(0)}°", Colors.cyanAccent),
+                        const SizedBox(height: 4),
+                        _hudRow(Icons.route, "Dist",
+                            "${dist.toStringAsFixed(2)}km", Colors.orangeAccent),
+                        const SizedBox(height: 4),
+                        _hudRow(Icons.speed, "Top",
+                            "${topSpd.toStringAsFixed(0)}km/h", Colors.purpleAccent),
+                        const SizedBox(height: 6),
+                        const Text('Hold to toggle shield',
+                            style: TextStyle(color: Colors.white24, fontSize: 8)),
+                      ],
+                    ),
                   ),
                 );
               }),

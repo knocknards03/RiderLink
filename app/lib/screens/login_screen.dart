@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../controllers/auth_controller.dart';
 import 'map_screen.dart';
+import 'otp_screen.dart';
 
 /// Full-screen login / register UI shown on first launch (or after logout).
 /// Two tabs: Sign In and Create Account.
@@ -63,7 +64,8 @@ class _LoginScreenState extends State<LoginScreen>
       password: _loginPasswordCtrl.text,
     );
     if (ok) {
-      Get.offAll(() => const MapScreen(), transition: Transition.fadeIn);
+      // Credentials valid + OTP sent → go to OTP screen
+      Get.to(() => const OtpScreen(), transition: Transition.rightToLeft);
     }
   }
 
@@ -78,7 +80,8 @@ class _LoginScreenState extends State<LoginScreen>
       emergencyContact: _regEmergencyCtrl.text.trim(),
     );
     if (ok) {
-      Get.offAll(() => const MapScreen(), transition: Transition.fadeIn);
+      // Account created + OTP sent → go to OTP screen
+      Get.to(() => const OtpScreen(), transition: Transition.rightToLeft);
     }
   }
 

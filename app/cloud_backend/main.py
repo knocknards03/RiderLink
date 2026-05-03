@@ -21,6 +21,10 @@ import logging
 import secrets
 import re
 import time
+import smtplib
+import hashlib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
@@ -31,6 +35,13 @@ import jwt
 from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, field_validator
+
+# ── Load .env if present ──────────────────────────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # SECRET_KEY persisted to disk so tokens survive backend restarts.
@@ -47,6 +58,14 @@ else:
 ALGORITHM      = "HS256"
 TOKEN_TTL_DAYS = 7
 DB_PATH        = os.environ.get("DB_PATH", "riderlink_users.db")
+
+# ── SMTP config (set in .env) ─────────────────────────────────────────────────
+SMTP_EMAIL    = os.environ.get("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_HOST     = "smtp.gmail.com"
+SMTP_PORT     = 587
+OTP_TTL_S     = 600   # OTP valid for 10 minutes
+OTP_LENGTH    = 6
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -114,7 +133,8 @@ def init_db():
                 emergency_contact TEXT,
                 password_hash TEXT    NOT NULL,
                 created_at    INTEGER NOT NULL,
-                last_login    INTEGER
+                last_login    INTEGER,
+                email_verified INTEGER NOT NULL DEFAULT 0
             )
         """)
         db.execute("""
@@ -201,7 +221,27 @@ def init_db():
                 FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE SET NULL
             )
         """)
+        # ── OTP table ─────────────────────────────────────────────────────────
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS otp_codes (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                email      TEXT    NOT NULL,
+                otp_hash   TEXT    NOT NULL,
+                purpose    TEXT    NOT NULL DEFAULT 'login',
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used       INTEGER NOT NULL DEFAULT 0
+            )
+        """)
     logger.info("Database initialised at %s", DB_PATH)
+
+    # ── Migrations for existing databases ─────────────────────────────────────
+    with get_db() as db:
+        try:
+            db.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
+            logger.info("Migration: added email_verified column")
+        except Exception:
+            pass  # column already exists
 
 init_db()
 
@@ -438,6 +478,194 @@ def logout(payload: dict = Depends(require_auth)):
             (jti, now_ts),
         )
     logger.info("Token revoked: jti=%s", jti)
+
+
+# ── OTP helpers ───────────────────────────────────────────────────────────────
+
+def _generate_otp() -> str:
+    """Generate a cryptographically secure 6-digit OTP."""
+    return str(secrets.randbelow(900000) + 100000)  # 100000–999999
+
+def _hash_otp(otp: str, email: str) -> str:
+    """Hash OTP with email as salt so the same OTP is different per user."""
+    return hashlib.sha256(f"{otp}:{email.lower()}".encode()).hexdigest()
+
+def _send_otp_email(to_email: str, otp: str, purpose: str) -> bool:
+    """Send OTP via Gmail SMTP. Returns True on success."""
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        # Dev mode — log OTP to console instead of emailing
+        logger.warning("SMTP not configured. OTP for %s: %s", to_email, otp)
+        return True
+
+    subject = "RiderLink — Your Verification Code"
+    action  = "sign in" if purpose == "login" else "verify your account"
+
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;
+                background:#0D0D0D;color:#fff;padding:32px;border-radius:16px;">
+      <div style="text-align:center;margin-bottom:24px;">
+        <span style="font-size:36px;">🏍️</span>
+        <h2 style="color:#fff;letter-spacing:4px;margin:8px 0;">RIDERLINK</h2>
+        <p style="color:#888;font-size:12px;margin:0;">Your offline safety ecosystem</p>
+      </div>
+      <p style="color:#ccc;">Use the code below to {action}. It expires in 10 minutes.</p>
+      <div style="background:#1E1E1E;border-radius:12px;padding:24px;
+                  text-align:center;margin:24px 0;">
+        <span style="font-size:42px;font-weight:bold;letter-spacing:12px;
+                     color:#FF4444;font-family:monospace;">{otp}</span>
+      </div>
+      <p style="color:#666;font-size:12px;">
+        If you didn't request this, ignore this email. Your account is safe.
+      </p>
+    </div>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = f"RiderLink <{SMTP_EMAIL}>"
+    msg["To"]      = to_email
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.sendmail(SMTP_EMAIL, to_email, msg.as_string())
+        logger.info("OTP email sent to %s", to_email)
+        return True
+    except Exception as e:
+        logger.error("Failed to send OTP email: %s", e)
+        return False
+
+
+class OtpRequest(BaseModel):
+    email: EmailStr
+    purpose: str = "login"   # "login" or "register"
+
+class OtpVerifyRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    purpose: str = "login"
+
+
+@app.post("/auth/send-otp", status_code=200)
+def send_otp(req: OtpRequest, request: Request):
+    """
+    Step 1 of 2-step auth.
+    Generates a 6-digit OTP, stores its hash, and emails it to the user.
+    For login: user must already exist.
+    For register: called after account creation to verify email.
+    """
+    _check_rate_limit(request, max_calls=5)  # stricter limit for OTP
+
+    email = req.email.lower().strip()
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    with get_db() as db:
+        user = db.execute(
+            "SELECT id FROM users WHERE email = ?", (email,)
+        ).fetchone()
+
+        if req.purpose == "login" and not user:
+            # Don't reveal whether email exists — generic message
+            raise HTTPException(404, "No account found with this email")
+
+        # Invalidate any existing unused OTPs for this email+purpose
+        db.execute(
+            "UPDATE otp_codes SET used=1 WHERE email=? AND purpose=? AND used=0",
+            (email, req.purpose),
+        )
+
+        otp     = _generate_otp()
+        otp_hash = _hash_otp(otp, email)
+        expires  = now_ts + OTP_TTL_S
+
+        db.execute(
+            """INSERT INTO otp_codes (email, otp_hash, purpose, created_at, expires_at, used)
+               VALUES (?, ?, ?, ?, ?, 0)""",
+            (email, otp_hash, req.purpose, now_ts, expires),
+        )
+
+    sent = _send_otp_email(email, otp, req.purpose)
+    if not sent:
+        raise HTTPException(500, "Failed to send OTP email. Check SMTP config.")
+
+    return {
+        "status": "otp_sent",
+        "message": f"A 6-digit code was sent to {email}. Valid for 10 minutes.",
+        "dev_mode": not bool(SMTP_EMAIL),  # tells client if OTP is in server logs
+    }
+
+
+@app.post("/auth/verify-otp", response_model=AuthResponse)
+def verify_otp(req: OtpVerifyRequest, request: Request):
+    """
+    Step 2 of 2-step auth.
+    Verifies the OTP and issues a JWT if correct.
+    """
+    _check_rate_limit(request, max_calls=10)
+
+    email    = req.email.lower().strip()
+    otp_hash = _hash_otp(req.otp.strip(), email)
+    now_ts   = int(datetime.now(timezone.utc).timestamp())
+
+    with get_db() as db:
+        # Find a valid, unused OTP for this email+purpose
+        row = db.execute(
+            """SELECT id FROM otp_codes
+               WHERE email=? AND otp_hash=? AND purpose=?
+                 AND used=0 AND expires_at > ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (email, otp_hash, req.purpose, now_ts),
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(401, "Invalid or expired OTP. Request a new code.")
+
+        # Mark OTP as used (one-time use)
+        db.execute("UPDATE otp_codes SET used=1 WHERE id=?", (row["id"],))
+
+        # Mark email as verified on the user record
+        db.execute(
+            "UPDATE users SET email_verified=1, last_login=? WHERE email=?",
+            (now_ts, email),
+        )
+
+        user = db.execute(
+            """SELECT id, name, email, phone, blood_group, emergency_contact,
+                      created_at, last_login
+               FROM users WHERE email=?""",
+            (email,),
+        ).fetchone()
+
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    token, jti, exp = _create_token(user["id"], email)
+
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO login_sessions (user_id, jti, issued_at, expires_at)
+               VALUES (?, ?, ?, ?)""",
+            (user["id"], jti, now_ts, int(exp.timestamp())),
+        )
+
+    logger.info("OTP verified and JWT issued for %s", email)
+    return AuthResponse(
+        token=token,
+        expires_in=TOKEN_TTL_DAYS * 86400,
+        user=UserProfile(
+            id=user["id"],
+            name=user["name"],
+            email=user["email"],
+            phone=user["phone"],
+            blood_group=user["blood_group"],
+            emergency_contact=user["emergency_contact"],
+            created_at=user["created_at"],
+            last_login=now_ts,
+        ),
+    )
 
 
 # ── Existing endpoints (unchanged) ───────────────────────────────────────────

@@ -18,7 +18,7 @@ import 'package:jwt_decoder/jwt_decoder.dart';
 ///   • Input trimming and length caps before sending to backend
 class AuthController extends GetxController {
   // ── Backend URL ─────────────────────────────────────────────────────────────
-  static const String _baseUrl = 'http://192.168.137.6:8080';
+  static const String _baseUrl = 'http://192.168.1.12:8080';
   static const String baseUrl  = _baseUrl;
 
   // ── Secure storage (Android Keystore / iOS Keychain) ────────────────────────
@@ -46,6 +46,12 @@ class AuthController extends GetxController {
   final RxString userPhone         = ''.obs;
   final RxString userEmergency     = ''.obs;
   final RxInt    userId            = 0.obs;
+
+  // OTP flow state
+  final RxBool   otpSent           = false.obs;
+  final RxString pendingEmail      = ''.obs;
+  final RxString pendingPurpose    = 'login'.obs;
+  final RxBool   devMode           = false.obs; // true = OTP in server logs
 
   String? _token;
   String get token => _token ?? '';
@@ -156,13 +162,14 @@ class AuthController extends GetxController {
     isLoading.value = true;
     errorMsg.value  = '';
     try {
+      // Step 1: create the account
       final res = await http.post(
         Uri.parse('$_baseUrl/auth/register'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'name':     _sanitise(name, maxLen: 100),
           'email':    email.trim().toLowerCase(),
-          'password': password, // never sanitise passwords — preserve all chars
+          'password': password,
           if (phone != null && phone.isNotEmpty)
             'phone': _sanitise(phone, maxLen: 20),
           if (bloodGroup != null && bloodGroup.isNotEmpty)
@@ -173,8 +180,9 @@ class AuthController extends GetxController {
       ).timeout(const Duration(seconds: 15));
 
       if (res.statusCode == 201) {
-        await _applyAuthResponse(jsonDecode(res.body) as Map<String, dynamic>);
-        return true;
+        // Step 2: send OTP to verify email
+        return await sendOtp(
+            email: email.trim().toLowerCase(), purpose: 'register');
       }
       errorMsg.value =
           ((jsonDecode(res.body) as Map)['detail'] ?? 'Registration failed')
@@ -195,6 +203,7 @@ class AuthController extends GetxController {
     isLoading.value = true;
     errorMsg.value  = '';
     try {
+      // Step 1: validate credentials
       final res = await http.post(
         Uri.parse('$_baseUrl/auth/login'),
         headers: {'Content-Type': 'application/json'},
@@ -205,11 +214,78 @@ class AuthController extends GetxController {
       ).timeout(const Duration(seconds: 15));
 
       if (res.statusCode == 200) {
-        await _applyAuthResponse(jsonDecode(res.body) as Map<String, dynamic>);
-        return true;
+        // Credentials valid — now send OTP for 2-step verification
+        return await sendOtp(
+            email: email.trim().toLowerCase(), purpose: 'login');
       }
       errorMsg.value =
           ((jsonDecode(res.body) as Map)['detail'] ?? 'Login failed')
+              .toString();
+      return false;
+    } catch (_) {
+      errorMsg.value = 'Network error — is the backend running?';
+      return false;
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  /// Step 2a — request OTP email
+  Future<bool> sendOtp({
+    required String email,
+    required String purpose,
+  }) async {
+    isLoading.value = true;
+    errorMsg.value  = '';
+    try {
+      final res = await http.post(
+        Uri.parse('$_baseUrl/auth/send-otp'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email, 'purpose': purpose}),
+      ).timeout(const Duration(seconds: 15));
+
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        pendingEmail.value   = email;
+        pendingPurpose.value = purpose;
+        otpSent.value        = true;
+        devMode.value        = body['dev_mode'] as bool? ?? false;
+        return true;
+      }
+      errorMsg.value =
+          ((jsonDecode(res.body) as Map)['detail'] ?? 'Failed to send OTP')
+              .toString();
+      return false;
+    } catch (_) {
+      errorMsg.value = 'Network error — is the backend running?';
+      return false;
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  /// Step 2b — verify OTP and receive JWT
+  Future<bool> verifyOtp(String otp) async {
+    isLoading.value = true;
+    errorMsg.value  = '';
+    try {
+      final res = await http.post(
+        Uri.parse('$_baseUrl/auth/verify-otp'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'email':   pendingEmail.value,
+          'otp':     otp.trim(),
+          'purpose': pendingPurpose.value,
+        }),
+      ).timeout(const Duration(seconds: 15));
+
+      if (res.statusCode == 200) {
+        await _applyAuthResponse(jsonDecode(res.body) as Map<String, dynamic>);
+        otpSent.value = false;
+        return true;
+      }
+      errorMsg.value =
+          ((jsonDecode(res.body) as Map)['detail'] ?? 'Invalid OTP')
               .toString();
       return false;
     } catch (_) {

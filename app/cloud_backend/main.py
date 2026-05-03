@@ -19,27 +19,68 @@ import os
 import sqlite3
 import logging
 import secrets
+import re
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from typing import Optional
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, field_validator
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SECRET_KEY = os.environ.get("JWT_SECRET", secrets.token_hex(32))
-ALGORITHM  = "HS256"
+# SECRET_KEY persisted to disk so tokens survive backend restarts.
+# On first run a random key is generated and saved to .jwt_secret file.
+_SECRET_FILE = os.environ.get("JWT_SECRET_FILE", ".jwt_secret")
+if os.path.exists(_SECRET_FILE):
+    with open(_SECRET_FILE) as f:
+        SECRET_KEY = f.read().strip()
+else:
+    SECRET_KEY = secrets.token_hex(32)
+    with open(_SECRET_FILE, "w") as f:
+        f.write(SECRET_KEY)
+
+ALGORITHM      = "HS256"
 TOKEN_TTL_DAYS = 7
-DB_PATH    = os.environ.get("DB_PATH", "riderlink_users.db")
+DB_PATH        = os.environ.get("DB_PATH", "riderlink_users.db")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="RiderLink Cloud Backend", version="2.0.0")
+app = FastAPI(title="RiderLink Cloud Backend", version="3.0.0")
 bearer_scheme = HTTPBearer()
+
+# ── Rate limiting (in-memory, per IP) ────────────────────────────────────────
+# Prevents brute-force login attacks.
+_rate_store: dict = defaultdict(list)   # ip → [timestamp, ...]
+_RATE_WINDOW_S = 60                     # 1-minute window
+_RATE_MAX_AUTH = 10                     # max 10 auth attempts per minute per IP
+
+def _check_rate_limit(request: Request, max_calls: int = _RATE_MAX_AUTH):
+    ip  = request.client.host if request.client else "unknown"
+    now = time.time()
+    window_start = now - _RATE_WINDOW_S
+    calls = [t for t in _rate_store[ip] if t > window_start]
+    calls.append(now)
+    _rate_store[ip] = calls
+    if len(calls) > max_calls:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests. Please wait a minute before trying again.",
+        )
+
+# ── Input sanitisation ────────────────────────────────────────────────────────
+
+def _sanitise(value: Optional[str], max_len: int = 200) -> Optional[str]:
+    if value is None:
+        return None
+    # Strip control characters, limit length
+    cleaned = re.sub(r'[\x00-\x1F\x7F]', '', value).strip()
+    return cleaned[:max_len] if cleaned else None
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -260,11 +301,21 @@ def health():
 
 
 @app.post("/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register(req: RegisterRequest):
+def register(req: RegisterRequest, request: Request):
     """Register a new rider account and return a JWT immediately."""
-    # Hash password with bcrypt (cost factor 12)
+    _check_rate_limit(request)
+
+    # Sanitise all string inputs
+    name      = _sanitise(req.name, 100) or ""
+    phone     = _sanitise(req.phone, 20)
+    blood     = _sanitise(req.blood_group, 10)
+    emergency = _sanitise(req.emergency_contact, 20)
+
+    if not name:
+        raise HTTPException(400, "Name is required")
+
     pw_hash = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt(rounds=12)).decode()
-    now_ts = int(datetime.now(timezone.utc).timestamp())
+    now_ts  = int(datetime.now(timezone.utc).timestamp())
 
     with get_db() as db:
         # Check duplicate email
@@ -278,8 +329,7 @@ def register(req: RegisterRequest):
             """INSERT INTO users
                (name, email, phone, blood_group, emergency_contact, password_hash, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (req.name, req.email, req.phone, req.blood_group,
-             req.emergency_contact, pw_hash, now_ts),
+            (name, req.email.lower().strip(), phone, blood, emergency, pw_hash, now_ts),
         )
         user_id = cursor.lastrowid
 
@@ -302,11 +352,11 @@ def register(req: RegisterRequest):
         expires_in=TOKEN_TTL_DAYS * 86400,
         user=UserProfile(
             id=user_id,
-            name=req.name,
-            email=req.email,
-            phone=req.phone,
-            blood_group=req.blood_group,
-            emergency_contact=req.emergency_contact,
+            name=name,
+            email=req.email.lower().strip(),
+            phone=phone,
+            blood_group=blood,
+            emergency_contact=emergency,
             created_at=now_ts,
             last_login=now_ts,
         ),
@@ -314,8 +364,9 @@ def register(req: RegisterRequest):
 
 
 @app.post("/auth/login", response_model=AuthResponse)
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
     """Authenticate with email + password, receive a JWT."""
+    _check_rate_limit(request)
     with get_db() as db:
         row = db.execute(
             """SELECT id, name, email, phone, blood_group, emergency_contact,
@@ -728,16 +779,25 @@ class SimEvent(BaseModel):
 
 @app.post("/sim/push", status_code=200)
 def sim_push(event: SimEvent, payload_auth: dict = Depends(require_auth)):
-    """Phone pushes an event (location update, message, SOS, hazard)."""
+    """Phone pushes an event. user_id is taken from the JWT — not the request body."""
+    # Always use the authenticated user's ID — prevents spoofing
+    real_user_id = int(payload_auth["sub"])
     now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    # Sanitise message content if present
+    payload_data = event.payload.copy()
+    if "msg" in payload_data and isinstance(payload_data["msg"], str):
+        payload_data["msg"] = _sanitise(payload_data["msg"], 500) or ""
+    if "content" in payload_data and isinstance(payload_data["content"], str):
+        payload_data["content"] = _sanitise(payload_data["content"], 500) or ""
+
     with _sim_lock:
         _sim_events.append({
-            "user_id":    event.user_id,
+            "user_id":    real_user_id,   # JWT-verified, not client-supplied
             "event_type": event.event_type,
-            "payload":    event.payload,
+            "payload":    payload_data,
             "ts":         now_ts,
         })
-        # Prune old events to keep memory bounded
         cutoff = now_ts - _SIM_MAX_AGE_S
         _sim_events[:] = [e for e in _sim_events if e["ts"] >= cutoff]
     return {"status": "ok", "ts": now_ts}

@@ -1,6 +1,6 @@
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:path/path.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:math';
 import 'dart:io';
 
@@ -22,35 +22,39 @@ class DatabaseHelper {
 
   Future<Database> _initDatabase() async {
     final dbPath = join(await getDatabasesPath(), 'riderlink_secure.db');
-    final prefs  = await SharedPreferences.getInstance();
 
-    // Generate (or restore) the per-install encryption key
-    String? dbKey = prefs.getString('_db_enc_key');
+    // DB encryption key stored in Android Keystore / iOS Keychain via
+    // flutter_secure_storage — NOT in SharedPreferences.
+    // This means the key is hardware-backed and unreadable even on rooted devices.
+    const secureStorage = FlutterSecureStorage(
+      aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    );
+    const _kDbKey = 'rl_db_enc_key';
+
+    String? dbKey = await secureStorage.read(key: _kDbKey);
     if (dbKey == null) {
-      const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      const chars =
+          'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
       final rng = Random.secure();
-      dbKey = List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
-      await prefs.setString('_db_enc_key', dbKey);
+      dbKey =
+          List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
+      await secureStorage.write(key: _kDbKey, value: dbKey);
     }
 
     try {
       return await _openDb(dbPath, dbKey);
     } catch (e) {
-      // The DB file is corrupt or was created with a different key
-      // (e.g. leftover from the old hardcoded-password version).
-      // Delete it and start fresh — trip history is lost but the app
-      // will not crash on every launch.
+      // Corrupt or stale DB — delete and recreate with a fresh key
       final file = File(dbPath);
-      if (await file.exists()) {
-        await file.delete();
-      }
-      // Also wipe the stale key so a new one is generated cleanly
-      await prefs.remove('_db_enc_key');
-      const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-      final rng = Random.secure();
-      dbKey = List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
-      await prefs.setString('_db_enc_key', dbKey);
+      if (await file.exists()) await file.delete();
+      await secureStorage.delete(key: _kDbKey);
 
+      const chars =
+          'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      final rng = Random.secure();
+      dbKey =
+          List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
+      await secureStorage.write(key: _kDbKey, value: dbKey);
       return await _openDb(dbPath, dbKey);
     }
   }
